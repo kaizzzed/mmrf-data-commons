@@ -2,8 +2,8 @@
   "enabled": true,
   "id": "prod-eks-maintenance-2026-11-05",
   "title": "Scheduled system maintenance",
-  "message": "Virtual Lab services may be unavailable November 5 between 9 a.m. and 3 p.m. Eastern while we perform scheduled maintenance.",
+  "message": "Virtual Lab services may be unavailable November 4 between 9 a.m. and 5 p.m. Eastern while we perform scheduled maintenance.",
   "buttonLabel": "Understood",
-  "startsAt": "2026-11-05T09:00:00-05:00",
-  "endsAt": "2026-11-05T16:00:00-05:00"
+  "startsAt": "2026-11-04T09:00:00-05:00",
+  "endsAt": "2026-11-04T17:00:00-05:00"
 }
