@@ -296,6 +296,13 @@ export const OrionPpCard = ({
           <>
             <div ref={viewerRef} className="min-h-[120px] overflow-x-auto bg-white" />
             {caption && <p className="text-sm">{caption}</p>}
+            {/* NFR-09 (A4): the chart's cited values as a text table beside it, chips included. */}
+            {frozenView && (
+              <details className="text-sm" data-testid="orion-viz-data-table">
+                <summary className="cursor-pointer font-medium">Data table</summary>
+                <div className="pt-2">{frozenView}</div>
+              </details>
+            )}
           </>
         ) : blocked ? (
           <>

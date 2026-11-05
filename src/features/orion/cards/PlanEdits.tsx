@@ -43,20 +43,22 @@ const ScopeEditor = ({
 }) => {
   const choices = options.filter((o) => !sameScope(o.choice, editable.value));
   const [key, setKey] = useState(choices[0] ? scopeKey(choices[0].choice) : '');
-  const picked = choices.find((o) => scopeKey(o.choice) === key);
-  if (choices.length === 0) return null;
+  // The pick can become the plan's scope (an edit applied it) and leave the choices: the select
+  // then shows the first choice, and Apply sends what it shows.
+  const picked = choices.find((o) => scopeKey(o.choice) === key) ?? choices[0];
+  if (!picked) return null;
   return (
     <div className="flex flex-wrap items-end gap-2">
       <NativeSelect
         label={editable.label}
-        value={key}
+        value={scopeKey(picked.choice)}
         onChange={(event) => setKey(event.currentTarget.value)}
         data={choices.map((o) => ({ value: scopeKey(o.choice), label: o.label }))}
       />
       <ApplyButton
         label={editable.label}
-        disabled={disabled || !picked}
-        onClick={() => picked && onEdit({ field: 'scope', value: picked.choice })}
+        disabled={disabled}
+        onClick={() => onEdit({ field: 'scope', value: picked.choice })}
       />
     </div>
   );

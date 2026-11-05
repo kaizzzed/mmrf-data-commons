@@ -1,6 +1,8 @@
 import React, { forwardRef, useId } from 'react';
 import { Button, Textarea } from '@mantine/core';
 import { LuSend, LuSquare } from 'react-icons/lu';
+import { MAX_QUESTION_CHARS } from '../constants';
+import { formatCount } from '../format';
 import { composerKeyAction } from './composerKeys';
 import { ScopeChip, type ScopeChipOption } from './ScopeChip';
 
@@ -24,7 +26,10 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
   ref,
 ) {
   const scopeId = useId();
-  const hasText = value.trim().length > 0;
+  const length = value.trim().length;
+  // A question past the agent's limit is turned away whole, so it does not leave the browser.
+  const tooLong = length > MAX_QUESTION_CHARS;
+  const hasText = length > 0 && !tooLong;
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const action = composerKeyAction(
@@ -55,6 +60,11 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
         // Mantine sets aria-describedby itself, from its description: the scope the question asks about.
         description={scopeLabel.replace(/^Scope: /, 'Scope for this question: ')}
         classNames={{ description: 'sr-only' }}
+        error={
+          tooLong
+            ? `A question can be at most ${formatCount(MAX_QUESTION_CHARS)} characters; this one has ${formatCount(length)}.`
+            : undefined
+        }
       />
       <div className="flex flex-wrap items-start justify-between gap-2">
         <ScopeChip label={scopeLabel} labelId={scopeId} options={scopeOptions} onSwitch={onSwitchScope} />

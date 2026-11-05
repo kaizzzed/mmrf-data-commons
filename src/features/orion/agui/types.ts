@@ -105,6 +105,8 @@ export const LIMITATION_CODES = [
   'REQUEST_TOO_LARGE',
   'CALL_BUDGET',
   'KG_NOT_CONNECTED',
+  // de_run found more genes past the thresholds than ProteinPaint returns as dots (5,000).
+  'ROWS_CAPPED',
 ] as const;
 export type LimitationCode = (typeof LIMITATION_CODES)[number];
 
@@ -734,6 +736,7 @@ export interface VizReport {
   runId: string;
   vizId: string;
   mounted: boolean;
+  /** The viewer's error text; the agent keeps at most 500 characters (VIZ_ERROR_MAX) and clips a longer one. */
   error: string | null;
   /** True when the recomputed pinnedHash equals pinnedHash and requestPinnedHash; null if not checked. */
   pinnedHashVerified: boolean | null;

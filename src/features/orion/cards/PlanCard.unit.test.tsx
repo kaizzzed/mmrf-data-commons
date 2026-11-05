@@ -1,7 +1,8 @@
 import React from 'react';
-import { screen, within } from '@testing-library/react';
+import { MantineProvider } from '@mantine/core';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Plan, RunView, Step } from '../agui/types';
+import type { Plan, RunView, ScopeChoice, Step } from '../agui/types';
 import { renderWithMantine, streamViews } from '../testing';
 import { PlanCard, rowStatus, type PlanCardProps } from './PlanCard';
 import type { ScopeOption } from './PlanEdits';
@@ -114,6 +115,37 @@ describe('<PlanCard />', () => {
     expect(screen.queryByRole('option', { name: 'Active cohort: All cases' })).toBeNull();
   });
 
+  it('after a scope edit stays open, Apply sends the scope the select shows (not the one just applied)', async () => {
+    const onEdit = jest.fn();
+    const black: ScopeChoice = { source: 'saved_cohort', cohortName: 'Black patients' };
+    const withScope = (value: ScopeChoice): RunView => ({
+      ...J3_PAUSE,
+      plan: J3_PAUSE.plan && {
+        ...J3_PAUSE.plan,
+        version: J3_PAUSE.plan.version + 1,
+        editable: J3_PAUSE.plan.editable.map((e) => (e.field === 'scope' ? { ...e, value } : e)),
+      },
+    });
+    const card = (view: RunView) => (
+      <MantineProvider>
+        <PlanCard status="AwaitingConfirmation" view={view} canEdit scopeOptions={SCOPES} onEdit={onEdit} />
+      </MantineProvider>
+    );
+    const { rerender } = render(card(J3_PAUSE));
+    await userEvent.click(screen.getByRole('button', { name: 'Edit settings' }));
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Scope' }), screen.getByRole('option', { name: 'Black patients' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Apply Scope' }));
+    expect(onEdit).toHaveBeenLastCalledWith({ field: 'scope', value: black });
+    // Plan version n+1 has the saved cohort as its scope; the settings stay open.
+    rerender(card(withScope(black)));
+    const select = screen.getByRole('combobox', { name: 'Scope' }) as HTMLSelectElement;
+    expect(screen.queryByRole('option', { name: 'Black patients' })).toBeNull();
+    expect(select.selectedOptions[0]).toHaveTextContent('All cases');
+    expect(screen.getByRole('button', { name: 'Apply Scope' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Apply Scope' }));
+    expect(onEdit).toHaveBeenLastCalledWith({ field: 'scope', value: { source: 'all_cases' } });
+  });
+
   it('offers no edits when the run cannot take one', () => {
     renderPlan({ canEdit: false });
     expect(screen.getByRole('button', { name: 'Edit settings' })).toBeDisabled();
@@ -138,6 +170,20 @@ describe('<PlanCard />', () => {
     expect(screen.getAllByRole('button', { name: /^Retry step/ })).toHaveLength(1);
     screen.getByRole('button', { name: 'Retry step s4 survival_compare' }).click();
     expect(onRetry).toHaveBeenCalledWith('s4');
+  });
+
+  it('keeps Retry step disabled while a turn for the run is in flight, as the other resume controls', () => {
+    const steps = J1_DONE.steps.map((s): Step => (s.id === 's4' ? { ...s, status: 'Failed', code: 'TOOL_FAILED' } : s));
+    const { onRetry } = renderPlan({
+      status: 'Partial',
+      view: { ...J1_DONE, steps },
+      busy: true,
+      canRetry: (step) => step.status === 'Failed',
+    });
+    const retry = screen.getByRole('button', { name: 'Retry step s4 survival_compare' });
+    expect(retry).toBeDisabled();
+    retry.click();
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it('shows a placeholder while planning', () => {

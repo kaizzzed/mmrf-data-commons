@@ -38,7 +38,8 @@ export interface RunActions {
   openOnCohort: (run: RunState, appId: AppId) => void;
   /** A viz card's hand-off: the card names its cohort (handoff.ts handoffFor). */
   openInTool: (run: RunState, spec: VizSpec, appId: AppId, cohortId: string | null) => void;
-  openLink: (link: OpenLink) => void;
+  /** A next-step "Open <app>" link: the app on the run's scope, as openOnCohort. */
+  openLink: (run: RunState, link: OpenLink) => void;
   reportViz: (report: VizReport) => void;
   loadUntrimmedSpec: (runId: string, vizId: string) => Promise<VizSpec | null>;
   saveState: (nonce: string) => SaveState;

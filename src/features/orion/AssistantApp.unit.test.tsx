@@ -637,6 +637,29 @@ describe('<AssistantApp /> the save pause', () => {
   });
 });
 
+describe('<AssistantApp /> the pause prompt once its run moves on', () => {
+  it("closes when the waiting run is answered on its card, so it never cancels a run that resumed", async () => {
+    const { transport, turns } = j3Transport(5);
+    renderApp(transport, writes().props);
+    await userEvent.type(composer(), 'DE by KRAS{Enter}');
+    const card = await pausedCard();
+    await userEvent.type(composer(), 'Something else');
+    await act(async () => {
+      await userEvent.keyboard('{Enter}');
+    });
+    expect(screen.getByRole('button', { name: 'Cancel the waiting run and send' })).toBeInTheDocument();
+    // The researcher answers the card instead: the run resumes, so the prompt no longer applies.
+    await userEvent.click(within(card).getByRole('button', { name: "Don't save" }));
+    expect(screen.queryByRole('button', { name: 'Cancel the waiting run and send' })).toBeNull();
+    await waitFor(() => expect(actions(turns)).toContain('confirm'));
+    expect(await screen.findAllByText('Complete')).not.toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Cancel the waiting run and send' })).toBeNull();
+    // The typed question waits in the composer; no ask cancelled the resumed run.
+    expect(composer()).toHaveValue('Something else');
+    expect(actions(turns)).toEqual(['warmup', 'ask', 'confirm']);
+  });
+});
+
 describe('<AssistantApp /> the Evidence Inspector', () => {
   it('opens from a chip on the step and its fact, and gives focus back on close', async () => {
     renderApp(recordingTransport().transport);
@@ -689,6 +712,53 @@ describe('<AssistantApp /> the composer scope chip', () => {
       expect(notifier.undos[0].onUndo()).toBe(true);
     });
     expect(selectCurrentCohortId(coreStore.getState())).toBe('c-all');
+  });
+});
+
+describe('<AssistantApp /> next-step open links', () => {
+  const cohort = (id: string, name: string): Cohort => ({
+    id,
+    name,
+    filters: { case_centric: { mode: 'and', root: { race: { operator: 'in', field: 'race', operands: [name] } } } as unknown as Cohort['filters'][string] },
+    createdDatetime: '2026-11-01T00:00:00.000Z',
+    modifiedDatetime: '2026-11-01T00:00:00.000Z',
+    counts: {},
+  });
+
+  /** The J1 answer, its scope the saved cohort `cohortId` rather than all cases. */
+  const scopedStream = (cohortId: string): string =>
+    streamText('j1-complete')
+      .split('\n\n')
+      .filter((frame) => frame.trim())
+      .map((frame) => {
+        const event = JSON.parse(frame.slice('data: '.length)) as AguiEvent;
+        if (event.type !== 'STATE_SNAPSHOT') return frame;
+        const cohorts = event.snapshot.cohorts.map((c) => (c.ref === 'base' ? { ...c, cohortId } : c));
+        return `data: ${JSON.stringify({ ...event, snapshot: { ...event.snapshot, cohorts } })}`;
+      })
+      .map((frame) => `${frame}\n\n`)
+      .join('');
+
+  it("opens the app on the run's cohort, naming the active-cohort switch it makes (R3)", async () => {
+    act(() => {
+      coreStore.dispatch(setCohortList([cohort('c-all', 'Cohort'), cohort('c-scope', 'Scope cohort')]));
+      coreStore.dispatch(setCurrentCohortId('c-all'));
+    });
+    const openApp = jest.fn();
+    const notifier = recordingNotifier();
+    const log = createWriteLog(() => undefined);
+    renderApp(fixtureTransport({ stream: scopedStream('c-scope'), delayMs: 0 }), { openApp, notifier, log });
+    await userEvent.type(composer(), 'Compare survival{Enter}');
+    const open = await screen.findByRole('button', { name: 'Make active and open Cohort Comparison' });
+    expect(openApp).not.toHaveBeenCalled();
+    await userEvent.click(open);
+    expect(selectCurrentCohortId(coreStore.getState())).toBe('c-scope');
+    expect(openApp).toHaveBeenCalledWith('CohortComparison');
+    expect(notifier.undos.map((u) => u.message)).toEqual(['Active cohort: Scope cohort.']);
+    expect(log.entries()).toEqual([expect.objectContaining({ action: 'set_active_cohort', cohortId: 'c-scope' })]);
+    act(() => {
+      coreStore.dispatch(setCurrentCohortId('c-all'));
+    });
   });
 });
 

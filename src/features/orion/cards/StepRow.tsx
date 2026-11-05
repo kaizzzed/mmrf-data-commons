@@ -48,12 +48,14 @@ export interface StepRowProps {
   step: Step;
   /** Retry step: offered for a failed read on the thread's latest run only. */
   onRetry?: () => void;
+  /** A turn for the run is in flight: Retry step waits, as the run's other resume controls do. */
+  retryDisabled?: boolean;
   /** Opens the step, its calls and facts in the Evidence Inspector. */
   onInspect?: () => void;
 }
 
 /** One counted call: status word and icon, duration, input and output, and its JSON. */
-export const StepRow = ({ step, onRetry, onInspect }: StepRowProps) => {
+export const StepRow = ({ step, onRetry, retryDisabled = false, onInspect }: StepRowProps) => {
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
   const inFlight = step.status === 'Running' || step.status === 'Retrying';
@@ -67,7 +69,14 @@ export const StepRow = ({ step, onRetry, onInspect }: StepRowProps) => {
         <span className="font-mono text-xs">{name}</span>
         {step.folded && <span className="text-xs italic">folded step</span>}
         {onRetry && (
-          <Button type="button" variant="outline" size="compact-xs" onClick={onRetry} aria-label={`Retry step ${name}`}>
+          <Button
+            type="button"
+            variant="outline"
+            size="compact-xs"
+            disabled={retryDisabled}
+            onClick={onRetry}
+            aria-label={`Retry step ${name}`}
+          >
             Retry step
           </Button>
         )}

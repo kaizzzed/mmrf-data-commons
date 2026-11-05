@@ -81,6 +81,19 @@ interface TurnContext {
   busyDeadline: number | null;
 }
 
+/**
+ * A turn whose stream failed and whose first view read failed too: nothing yet says whether it
+ * started. Its follower keeps reading; the first view settles it, a 404 rejects it.
+ */
+interface UnsettledTurn {
+  reports: VizReport[];
+  /** The rejection a 404 makes of it. */
+  code: NoticeCode;
+  message: string;
+  /** The transport failure that stands if no read ever answers. */
+  failure: string;
+}
+
 const buildInput = (threadId: string, runId: string, orion: OrionAction, question?: string): RunAgentInput => ({
   threadId,
   runId,
@@ -176,17 +189,27 @@ export const createRunController = (
     return controller;
   };
 
+  /** An invocation stays open until it settles either way: a failed one must not hold the queue. */
   const track = (threadId: string, invocation: Promise<void>): void => {
     const open = inflight.get(threadId) ?? new Set<Promise<void>>();
     inflight.set(threadId, open);
     open.add(invocation);
-    void invocation.then(() => open.delete(invocation));
+    void invocation.then(
+      () => open.delete(invocation),
+      (err: unknown) => {
+        open.delete(invocation);
+        console.warn('[orion] turn ended with an error', err);
+      },
+    );
   };
+
+  /** Settles once every open invocation of the thread has, however each ended. */
+  const openSettled = (threadId: string): Promise<void> =>
+    Promise.allSettled([...(inflight.get(threadId) ?? [])]).then(() => undefined);
 
   /** Runs `send` once the thread's open invocations settle, and tracks it as open. */
   const enqueue = (threadId: string, send: () => Promise<void> | void): void => {
-    const open = Promise.all([...(inflight.get(threadId) ?? [])]).then(() => undefined);
-    track(threadId, settleWithin(open, QUEUE_WAIT_MS).then(send));
+    track(threadId, settleWithin(openSettled(threadId), QUEUE_WAIT_MS).then(send));
   };
 
   // ------------------------------------------------------------ viz reports
@@ -252,13 +275,19 @@ export const createRunController = (
 
   // ------------------------------------------------------------ the view route
 
-  /** Polls a run until it leaves a leased status; views only ever replace older ones. */
-  const follow = (threadId: string, runId: string): void => {
+  /**
+   * Polls a run until it leaves a leased status; views only ever replace older ones. A read that
+   * fails is tried again on the next poll. With `lost`, the run is a turn whose state is still
+   * unknown: the first view settles that turn and a 404 rejects it (as checkView does); if no read
+   * answers before the limit, its transport failure stands.
+   */
+  const follow = (threadId: string, runId: string, lost?: UnsettledTurn): void => {
     if (!routes || disposed) return;
     stopFollowing(threadId);
     const controller = new AbortController();
     followers.set(threadId, controller);
     const deadline = Date.now() + FOLLOW_LIMIT_MS;
+    let unsettled = lost ?? null;
     void (async () => {
       try {
         while (Date.now() < deadline) {
@@ -269,14 +298,27 @@ export const createRunController = (
           } catch (err) {
             if (controller.signal.aborted) return;
             if (notFound(err)) {
-              toThread(threadId, { type: 'dropRun', runId });
+              if (unsettled) {
+                requeue(threadId, unsettled.reports);
+                toThread(threadId, { type: 'turnRejected', runId, code: unsettled.code, message: unsettled.message });
+              } else {
+                toThread(threadId, { type: 'dropRun', runId });
+              }
               return;
             }
             continue;
           }
           if (controller.signal.aborted) return;
           toThread(threadId, { type: 'view', view });
+          if (unsettled) {
+            toThread(threadId, { type: 'turnSettled', runId });
+            unsettled = null;
+          }
           if (!isLeasedStatus(view.status)) return;
+        }
+        if (unsettled) {
+          const message = `${unsettled.message}; the run's status could not be read`;
+          toThread(threadId, { type: 'transportError', runId, code: unsettled.failure, message });
         }
       } catch (err) {
         if (!(err instanceof Aborted)) throw err;
@@ -290,6 +332,8 @@ export const createRunController = (
    * A turn whose stream failed or ended without a terminal event (or a BFF 502 or 504): the view
    * route says what became of its run. 200 shows that run and follows it while it is leased; 404
    * means the turn never started, so it is rejected (an ask's question goes back to the composer).
+   * A read that fails says neither: the run stays as shown (still `checking`, so an unstarted ask
+   * is not shown Failed) and a follower keeps reading every 2 s until one of the two answers.
    */
   const checkView = async (
     ctx: TurnContext,
@@ -307,14 +351,17 @@ export const createRunController = (
       if (notFound(err)) {
         requeue(threadId, ctx.reports);
         toThread(threadId, { type: 'turnRejected', runId, code, message });
-      } else {
-        toThread(threadId, {
-          type: 'transportError',
-          runId,
-          code: err instanceof TransportError ? err.code : 'NETWORK',
-          message: `${message}; the run's status could not be read either`,
-        });
+        return;
       }
+      const failure = err instanceof TransportError ? err.code : 'NETWORK';
+      toThread(threadId, {
+        type: 'transportError',
+        runId,
+        code: failure,
+        message: `${message}; the run's status could not be read either`,
+        checking: true,
+      });
+      follow(threadId, runId, { reports: ctx.reports, code, message, failure });
       return;
     }
     if (signal.aborted) return;
@@ -336,12 +383,21 @@ export const createRunController = (
       return;
     }
     const deadline = ctx.busyDeadline ?? Date.now() + BUSY_POLL_LIMIT_MS;
+    /** The last view a poll showed: a run still leased when polling gives up is followed. */
+    let last: RunView | null = null;
     const giveUp = () => {
       requeue(threadId, ctx.reports);
       toThread(threadId, { type: 'turnRejected', runId, code: 'SESSION_BUSY', message });
+      if (last && isLeasedStatus(last.status)) follow(threadId, runId);
     };
     while (Date.now() < deadline) {
-      await wait(BUSY_POLL_MS, controller.signal);
+      try {
+        await wait(BUSY_POLL_MS, controller.signal);
+      } catch (err) {
+        // A new turn on the thread (Stop, a resume, an ask) or dispose took over: nothing to send.
+        if (err instanceof Aborted) return;
+        throw err;
+      }
       let view: RunView | null;
       try {
         view = await routes.view(runId, threadId, controller.signal);
@@ -362,6 +418,7 @@ export const createRunController = (
         return;
       }
       toThread(threadId, { type: 'view', view });
+      last = view;
       if (ctx.kind === 'ask') {
         // It started after all: follow the run instead of sending it twice.
         toThread(threadId, { type: 'turnSettled', runId });
@@ -529,7 +586,7 @@ export const createRunController = (
       const controller = new AbortController();
       detached.add(controller);
       sendTurn(threadId, runId, { action: 'cancel' }, 'cancel', controller);
-      void Promise.all([...(inflight.get(threadId) ?? [])]).then(() => detached.delete(controller));
+      void openSettled(threadId).then(() => detached.delete(controller));
     },
     resume(threadId, runId, action, expect) {
       const controller = begin(threadId);

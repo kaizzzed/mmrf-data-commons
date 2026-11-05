@@ -46,3 +46,9 @@ export const REFERENCE_PROMPTS: readonly ReferencePrompt[] = [
     text: 'Differential expression between patients with and without a KRAS mutation, top 10 genes',
   },
 ];
+
+/** The longest question an ask carries (contract `ask.question`, 1–4000 characters). */
+export const MAX_QUESTION_CHARS = 4000;
+
+/** The most saved cohorts a turn's cohortContext carries (the agent's CohortContext schema). */
+export const MAX_SAVED_COHORTS = 200;

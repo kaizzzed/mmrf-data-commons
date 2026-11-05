@@ -75,7 +75,7 @@ describe('every fixture stream, replayed and rendered through the cards', () => 
     within(answer()).getByRole('button', { name: 'Survival by ISS stage' }).click();
     expect(actions.askFollowUp).toHaveBeenCalledWith(expect.objectContaining({ question: 'Compare survival by ISS stage' }));
     within(answer()).getByRole('button', { name: 'Open Cohort Comparison' }).click();
-    expect(actions.openLink).toHaveBeenCalledWith({ appId: 'CohortComparison', title: 'Cohort Comparison' });
+    expect(actions.openLink).toHaveBeenCalledWith(runOf('j1-complete'), { appId: 'CohortComparison', title: 'Cohort Comparison' });
     expect(screen.getByRole('region', { name: 'Viz v1' })).toHaveTextContent('Overall survival by CGS risk category');
     // The scope line cites the fingerprint's case count.
     expect(within(plan()).getByText(/Scope: All cases ·/)).toHaveTextContent('Scope: All cases · 1,000Row 1 · s1 fixture_fingerprint cases');
@@ -89,6 +89,15 @@ describe('every fixture stream, replayed and rendered through the cards', () => 
     within(plan()).getByRole('button', { name: 'Retry step s4 survival_compare' }).click();
     expect(actions.retry).toHaveBeenCalledWith(run, 's4');
     expect(within(answer()).getByText('Interpretation withheld: a step failed')).toBeInTheDocument();
+  });
+
+  it('j1-partial: Retry step waits while a turn for the run is in flight', () => {
+    const run = runOf('j1-partial');
+    const { actions } = renderRun('j1-partial', { busyRunId: run.runId });
+    const retry = within(plan()).getByRole('button', { name: 'Retry step s4 survival_compare' });
+    expect(retry).toBeDisabled();
+    retry.click();
+    expect(actions.retry).not.toHaveBeenCalled();
   });
 
   it('j1-partial on an older run offers no Retry step', () => {

@@ -1,16 +1,17 @@
-import React from 'react';
+import React, { useContext } from 'react';
 import { LuUnlink } from 'react-icons/lu';
 import { isEndStatus, type RunState } from '../agui/reducer';
-import { ACTION_STATUSES, type RunStatus, type Step } from '../agui/types';
-import { AnswerCard } from '../cards/AnswerCard';
+import { ACTION_STATUSES, type OpenLink, type RunStatus, type Step } from '../agui/types';
+import { AnswerCard, type OpenLinkHandoff } from '../cards/AnswerCard';
 import { ClarificationCard } from '../cards/ClarificationCard';
 import { ConfirmationCard } from '../cards/ConfirmationCard';
 import { ConsentCard } from '../cards/ConsentCard';
 import { FailedCard } from '../cards/FailedCard';
 import { LimitationCard, nearestAppOf } from '../cards/LimitationCard';
 import { PlanCard } from '../cards/PlanCard';
-import { scopeHandoff } from '../handoff/handoff';
+import { MAKE_ACTIVE_LABEL, scopeHandoff } from '../handoff/handoff';
 import { VizCard } from '../viz/VizCard';
+import { VizServicesContext } from '../viz/vizServices';
 import { useRunActions } from './RunActions';
 
 const ANSWER_STATUSES: ReadonlySet<RunStatus> = new Set(['Answering', 'Complete', 'Partial', 'ObservedOnly']);
@@ -25,6 +26,7 @@ export interface RunItemProps {
 /** One question and everything its run has shown so far, top to bottom (F2). */
 export const RunItem = ({ run }: RunItemProps) => {
   const actions = useRunActions();
+  const { activeCohortId } = useContext(VizServicesContext);
   const { view, status } = run;
   const isLatest = actions.latestRunId === run.runId;
   const busy = actions.busyRunId === run.runId;
@@ -42,6 +44,15 @@ export const RunItem = ({ run }: RunItemProps) => {
   const canRetry = (step: Step) => isLatest && status === 'Partial' && step.status === 'Failed' && step.kind !== 'client';
   const nearestApp = view ? nearestAppOf(view.limitations) : undefined;
   const scopeHandoffReason = view && nearestApp ? scopeHandoff(nearestApp.appId, view).disabledReason : null;
+  const openLinkHandoff = (link: OpenLink): OpenLinkHandoff | null => {
+    if (!view) return null;
+    const handoff = scopeHandoff(link.appId, view, activeCohortId);
+    return {
+      switches: handoff.label === MAKE_ACTIVE_LABEL,
+      cohortName: handoff.cohortNames[0] ?? null,
+      disabledReason: handoff.disabledReason,
+    };
+  };
 
   return (
     <article aria-label={run.question || 'Run'} className="flex flex-col gap-3">
@@ -118,7 +129,8 @@ export const RunItem = ({ run }: RunItemProps) => {
           view={limited ? { ...view, limitations: [] } : view}
           onCite={cite}
           onAsk={actions.askFollowUp}
-          onOpenLink={actions.openLink}
+          onOpenLink={(link) => actions.openLink(run, link)}
+          openLinkHandoff={openLinkHandoff}
         />
       )}
       {limited && view && (

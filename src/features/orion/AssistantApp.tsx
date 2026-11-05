@@ -38,7 +38,7 @@ import type { ScopeChipOption } from './components/ScopeChip';
 import { Starters } from './components/Starters';
 import { ThreadList } from './components/ThreadList';
 import { ThreadView } from './components/ThreadView';
-import { FIXTURE_NOTICE, SYNTHETIC_NOTICE } from './constants';
+import { FIXTURE_NOTICE, MAX_QUESTION_CHARS, SYNTHETIC_NOTICE } from './constants';
 import { useRunController, type ResumeAction, type ResumeExpectation } from './controller/useRunController';
 import { formatScope } from './format';
 import { handoffFor, openInTool, scopeHandoff, type Handoff } from './handoff/handoff';
@@ -193,6 +193,13 @@ const AssistantMain = ({
   const announcement = useRunAnnouncements(thread);
   useRestoreRejectedQuestion(tab, setDraft);
   const { active } = cohortContext;
+  // The prompt asks about a run that waits. Once that run has moved on (answered on its card,
+  // resumed, ended) or a turn is in flight, its question no longer applies.
+  const pausedRun = pause ? thread.runs[pause.runId] : undefined;
+  const pauseStale = pause !== null && (running || !pausedRun || !isWaitingStatus(pausedRun.status));
+  useEffect(() => {
+    if (pauseStale) setPause(null);
+  }, [pauseStale]);
 
   useEffect(() => saveTab(tab), [tab]);
   useEffect(() => controller.warmup(threadId), [controller, threadId]);
@@ -238,7 +245,8 @@ const AssistantMain = ({
 
   const send = (text: string, fromComposer: boolean) => {
     const question = text.trim();
-    if (!question || running) return;
+    // The composer says why a question past the limit waits; the agent would turn it away.
+    if (!question || question.length > MAX_QUESTION_CHARS || running) return;
     if (latestRun && isWaitingStatus(latestRun.status)) {
       // A thread never holds two unfinished runs: ask once what to do with the waiting one.
       setPause({ question, runId: latestRun.runId, fromComposer });
@@ -257,6 +265,8 @@ const AssistantMain = ({
 
   const resume = (run: RunState, action: ResumeAction) => {
     resendStops();
+    // Answering the waiting run on its card answers the prompt too; the typed text stays put.
+    setPause(null);
     controller.resume(threadId, run.runId, action, expectationOf(run));
   };
 
@@ -377,7 +387,12 @@ const AssistantMain = ({
       // The card decided with handoffFor too; Don't save keeps it off here as well (C-16).
       if (run.view) handOff(run, handoffFor({ ...spec, appId }, spec.pinned, run.view), cohortId);
     },
-    openLink: (link) => openApp(link.appId),
+    openLink: (run, link) => {
+      // A next-step link hands off as "Open on this cohort" does: on the run's scope (R3).
+      const handoff = run.view ? scopeHandoff(link.appId, run.view) : null;
+      if (handoff) handOff(run, handoff, handoff.cohortId);
+      else openApp(link.appId);
+    },
     reportViz: (report) => controller.reportViz(threadId, report),
     loadUntrimmedSpec: (runId, vizId) => controller.loadSpec(threadId, runId, vizId),
     saveState: (nonce) => {
@@ -436,7 +451,8 @@ const AssistantMain = ({
             <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
               {announcement}
             </div>
-            {pause && (
+            {/* Shown only while its run still waits and no turn is in flight, so the click cancels that run. */}
+            {pause && !pauseStale && (
               <PausePrompt
                 onCancelAndSend={() => ask(pause.question, pause.runId, pause.fromComposer)}
                 onKeepWaiting={() => {

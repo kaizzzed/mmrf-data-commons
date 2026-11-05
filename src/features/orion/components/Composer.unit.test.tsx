@@ -68,6 +68,23 @@ describe('<Composer />', () => {
     expect(box).toHaveValue('first line\nsecond');
   });
 
+  it('holds a question past 4,000 characters and says why, instead of sending one the agent turns away', async () => {
+    const onSend = jest.fn();
+    renderWithMantine(<Harness onSend={onSend} onStop={jest.fn()} />);
+    const box = screen.getByRole('textbox', { name: 'Ask ORION' });
+    fireEvent.change(box, { target: { value: 'x'.repeat(4001) } });
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByText('A question can be at most 4,000 characters; this one has 4,001.')).toBeInTheDocument();
+    expect(box).toHaveAttribute('aria-invalid', 'true');
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.change(box, { target: { value: 'x'.repeat(4000) } });
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+    expect(screen.queryByText(/^A question can be at most/)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the scope chip and a disabled Send until there is text', () => {
     renderWithMantine(<Harness onSend={jest.fn()} onStop={jest.fn()} />);
     expect(screen.getByText('Scope: All cases · 1,000 cases')).toBeInTheDocument();

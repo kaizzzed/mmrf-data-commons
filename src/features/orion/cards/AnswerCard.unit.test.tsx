@@ -1,4 +1,5 @@
 import React from 'react';
+import { MantineProvider } from '@mantine/core';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { RunView } from '../agui/types';
@@ -76,6 +77,35 @@ describe('<AnswerCard />', () => {
     expect(onAsk).toHaveBeenCalledWith(COMPLETE.followUps[1]);
     await userEvent.click(screen.getByRole('button', { name: 'Open Cohort Comparison' }));
     expect(onOpenLink).toHaveBeenCalledWith({ appId: 'CohortComparison', title: 'Cohort Comparison' });
+  });
+
+  it('names the active-cohort switch an open link makes, and keeps a link that cannot open off with its reason', async () => {
+    const onOpenLink = jest.fn();
+    const { rerender } = renderWithMantine(
+      <AnswerCard
+        status="Complete"
+        view={COMPLETE}
+        onOpenLink={onOpenLink}
+        openLinkHandoff={() => ({ switches: true, cohortName: 'Black patients', disabledReason: null })}
+      />,
+    );
+    const open = screen.getByRole('button', { name: 'Make active and open Cohort Comparison' });
+    expect(open).toHaveAttribute('title', 'Makes Black patients the active cohort first');
+    await userEvent.click(open);
+    expect(onOpenLink).toHaveBeenCalledWith({ appId: 'CohortComparison', title: 'Cohort Comparison' });
+    rerender(
+      <MantineProvider>
+        <AnswerCard
+          status="Complete"
+          view={COMPLETE}
+          onOpenLink={onOpenLink}
+          openLinkHandoff={() => ({ switches: false, cohortName: null, disabledReason: 'Not on this cohort.' })}
+        />
+      </MantineProvider>,
+    );
+    const off = screen.getByRole('button', { name: 'Open Cohort Comparison' });
+    expect(off).toBeDisabled();
+    expect(off).toHaveAccessibleDescription('Not on this cohort.');
   });
 
   it('marks a sentence the verifier dropped', () => {

@@ -163,6 +163,30 @@ describe('<OrionPpCard />', () => {
     expect(errorText(root)).toBe('The viewer reported an error.');
   });
 
+  it('keeps the cited table beside a live chart, as a "Data table" disclosure (NFR-09 A4)', async () => {
+    const table = (
+      <table aria-label="Cited output: A">
+        <tbody>
+          <tr>
+            <td>High risk</td>
+          </tr>
+        </tbody>
+      </table>
+    );
+    renderCards(
+      createLiveVizRegistry(),
+      <OrionPpCard vizId="a" title="A" pinned={survival} host="/protein-paint" frozenView={table} />,
+    );
+    await waitFor(() => expect(phaseOf('a')).toBe('mounted'));
+    const viz = screen.getByTestId('orion-viz-a');
+    const disclosure = within(viz).getByTestId('orion-viz-data-table');
+    expect(disclosure.tagName).toBe('DETAILS');
+    expect(within(disclosure).getByText('Data table')).toBeInTheDocument();
+    await userEvent.click(within(disclosure).getByText('Data table'));
+    expect(disclosure).toHaveAttribute('open');
+    expect(within(disclosure).getByRole('table', { name: 'Cited output: A' })).toHaveTextContent('High risk');
+  });
+
   it('reports one mounted outcome per live session', async () => {
     const outcomes: ViewerOutcome[] = [];
     renderCards(

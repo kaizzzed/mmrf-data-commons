@@ -43,12 +43,14 @@ export const stepsForRow = (row: PlanRow, steps: readonly Step[]): Step[] => {
 const PlanRowItem = ({
   row,
   steps,
+  busy,
   canRetry,
   onRetry,
   onInspectStep,
 }: {
   row: PlanRow;
   steps: Step[];
+  busy: boolean;
   canRetry: (step: Step) => boolean;
   onRetry?: (stepId: string) => void;
   onInspectStep?: (stepId: string) => void;
@@ -81,6 +83,7 @@ const PlanRowItem = ({
               key={step.id}
               step={step}
               onRetry={onRetry && canRetry(step) ? () => onRetry(step.id) : undefined}
+              retryDisabled={busy}
               onInspect={onInspectStep ? () => onInspectStep(step.id) : undefined}
             />
           ))}
@@ -122,7 +125,7 @@ export interface PlanCardProps {
   view: RunView | null;
   /** The plan takes an edit now: the run's status accepts edit_plan and it is the thread's latest run. */
   canEdit?: boolean;
-  /** A turn for this run is in flight: edits wait. */
+  /** A turn for this run is in flight: edits and Retry step wait. */
   busy?: boolean;
   /** Retry step applies to this step (a failed read of the latest Partial run). */
   canRetry?: (step: Step) => boolean;
@@ -205,6 +208,7 @@ export const PlanCard = ({
                 key={row.row}
                 row={row}
                 steps={stepsForRow(row, steps)}
+                busy={busy}
                 canRetry={canRetry}
                 onRetry={onRetry}
                 onInspectStep={onInspectStep}

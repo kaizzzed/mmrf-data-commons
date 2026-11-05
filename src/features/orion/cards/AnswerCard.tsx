@@ -72,15 +72,60 @@ export const LimitationLine = ({
   </>
 );
 
+/** How an "Open <app>" link hands off, from the run's scope (handoff.ts scopeHandoff). */
+export interface OpenLinkHandoff {
+  /** The click makes the run's cohort active first: the button says so. */
+  switches: boolean;
+  cohortName: string | null;
+  /** Set when the link is off; shown beside it. */
+  disabledReason: string | null;
+}
+
 export interface AnswerCardProps {
   status: RunStatus;
   view: RunView;
   onCite?: (factId: string) => void;
   /** A follow-up chip asks its question as a new turn. */
   onAsk?: (followUp: FollowUp) => void;
-  /** "Open <app>": click-only, same-tab, no cohort switch. */
+  /** "Open <app>": click-only, same-tab, on the run's scope; a switch of active cohort is named. */
   onOpenLink?: (link: OpenLink) => void;
+  /** The hand-off each link makes; absent, a link opens the app with no cohort switch. */
+  openLinkHandoff?: (link: OpenLink) => OpenLinkHandoff | null;
 }
+
+const OpenLinkButton = ({
+  link,
+  handoff,
+  onOpenLink,
+}: {
+  link: OpenLink;
+  handoff: OpenLinkHandoff | null;
+  onOpenLink?: (link: OpenLink) => void;
+}) => {
+  const reasonId = useId();
+  const reason = handoff?.disabledReason ?? null;
+  return (
+    <li className="flex flex-wrap items-center gap-2">
+      <Button
+        type="button"
+        variant="subtle"
+        size="compact-sm"
+        disabled={!onOpenLink || reason !== null}
+        aria-describedby={reason ? reasonId : undefined}
+        title={handoff?.switches && handoff.cohortName ? `Makes ${handoff.cohortName} the active cohort first` : undefined}
+        rightSection={<LuExternalLink aria-hidden focusable="false" />}
+        onClick={() => onOpenLink?.(link)}
+      >
+        {handoff?.switches ? `Make active and open ${link.title}` : `Open ${link.title}`}
+      </Button>
+      {reason && (
+        <span id={reasonId} className="text-xs">
+          {reason}
+        </span>
+      )}
+    </li>
+  );
+};
 
 const hasModelText = (view: RunView): boolean => view.interpretation !== null && view.interpretation.length > 0;
 
@@ -90,7 +135,7 @@ const hasModelText = (view: RunView): boolean => view.interpretation !== null &&
  * Limitations show first with "Writing interpretation" (C-22); any other end state shows
  * "Interpretation withheld: <reason>" in place of the model's two parts.
  */
-export const AnswerCard = ({ status, view, onCite, onAsk, onOpenLink }: AnswerCardProps) => {
+export const AnswerCard = ({ status, view, onCite, onAsk, onOpenLink, openLinkHandoff }: AnswerCardProps) => {
   const titleId = useId();
   const facts = factMap(view.facts);
   const interpreted = hasModelText(view);
@@ -144,18 +189,12 @@ export const AnswerCard = ({ status, view, onCite, onAsk, onOpenLink }: AnswerCa
             {openLinks.length > 0 && (
               <ul aria-label="Other apps" className="mt-2 flex flex-wrap gap-2">
                 {openLinks.map((link) => (
-                  <li key={link.appId}>
-                    <Button
-                      type="button"
-                      variant="subtle"
-                      size="compact-sm"
-                      disabled={!onOpenLink}
-                      rightSection={<LuExternalLink aria-hidden focusable="false" />}
-                      onClick={() => onOpenLink?.(link)}
-                    >
-                      Open {link.title}
-                    </Button>
-                  </li>
+                  <OpenLinkButton
+                    key={link.appId}
+                    link={link}
+                    handoff={openLinkHandoff?.(link) ?? null}
+                    onOpenLink={onOpenLink}
+                  />
                 ))}
               </ul>
             )}

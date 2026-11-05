@@ -1,14 +1,16 @@
-import type { ThreadAction } from '../agui/reducer';
+import { activeRunId, type ThreadAction } from '../agui/reducer';
 import type { ParseResult } from '../agui/sseParser';
 import { TransportError, type RunRoutes, type RunTransport } from '../agui/transport';
 import type { AguiEvent, CohortContext, RunAgentInput, RunView, VizReport } from '../agui/types';
-import type { TabAction } from '../state/tab';
+import { createTab, tabReducer, type TabAction, type TabState } from '../state/tab';
 import { streamViews } from '../testing';
 import {
   BUSY_POLL_LIMIT_MS,
   BUSY_POLL_MS,
   createRunController,
+  FOLLOW_LIMIT_MS,
   FOLLOW_POLL_MS,
+  QUEUE_WAIT_MS,
   VIZ_REPORT_IDLE_MS,
   type RunController,
 } from './runController';
@@ -312,7 +314,11 @@ describe('createRunController: BFF errors', () => {
     controller.resume(THREAD, RUN, { action: 'consent', accept: true }, { status: 'AwaitingConsent', nonce: null });
     await jest.advanceTimersByTimeAsync(BUSY_POLL_LIMIT_MS + BUSY_POLL_MS);
     expect(turns).toHaveLength(1);
-    expect(threadActions().at(-1)).toEqual({ type: 'turnRejected', runId: RUN, code: 'SESSION_BUSY', message: 'the BFF said SESSION_BUSY' });
+    const rejected = { type: 'turnRejected', runId: RUN, code: 'SESSION_BUSY', message: 'the BFF said SESSION_BUSY' };
+    const at = threadActions().findIndex((a) => a.type === 'turnRejected');
+    expect(threadActions()[at]).toEqual(rejected);
+    // The run was still leased: only the view route's reads follow the notice, never a resend.
+    expect(threadActions().slice(at + 1).every((a) => a.type === 'view')).toBe(true);
   });
 
   it('UPSTREAM_TIMEOUT: reads the view first; a 200 shows the run and follows it until it settles', async () => {
@@ -439,5 +445,195 @@ describe('createRunController: resumes and Stop', () => {
     controller.ask(THREAD, 'q', COHORT);
     await jest.advanceTimersByTimeAsync(0);
     expect(dispatch).toHaveBeenCalled();
+  });
+});
+
+/** A controller whose dispatches go through the real tab reducer, so tests read the thread itself. */
+const withReducer = (transport: RunTransport) => {
+  let tab: TabState = createTab(THREAD);
+  const controller = createRunController(transport, (action: TabAction) => {
+    tab = tabReducer(tab, action);
+  });
+  return { controller, thread: () => tab.threads[THREAD] };
+};
+
+/** An ask whose stream yields `events` and then fails as a dropped connection does. */
+const droppedAsk = (events: (input: RunAgentInput) => AguiEvent[], routes: RunRoutes) => {
+  const turns: RunAgentInput[] = [];
+  const transport: RunTransport = {
+    routes,
+    async *run(input): AsyncGenerator<ParseResult> {
+      turns.push(input);
+      for (const event of events(input)) yield { kind: 'event', event };
+      throw new TransportError('NETWORK', 'network error');
+    },
+  };
+  return { transport, turns };
+};
+
+const viewRoutes = (view: jest.Mock): RunRoutes => ({
+  view,
+  record: jest.fn(async () => {
+    throw notStored();
+  }),
+  recordDownloadHref: () => '/record',
+});
+
+const offline = () => new TransportError('NETWORK', 'offline');
+
+describe('createRunController: a lost stream whose view read fails too', () => {
+  it('keeps reading the view route and follows the run until it settles (no stuck Executing run)', async () => {
+    let reads = 0;
+    const view = jest.fn(async (runId: string) => {
+      reads += 1;
+      if (reads === 1) throw offline();
+      return { ...J1_DONE, threadId: THREAD, runId };
+    });
+    const { transport } = droppedAsk(
+      (input) => [
+        { type: 'RUN_STARTED', threadId: input.threadId, runId: input.runId },
+        { type: 'STATE_SNAPSHOT', snapshot: { ...J1_EXECUTING, threadId: input.threadId, runId: input.runId } },
+      ],
+      viewRoutes(view),
+    );
+    const { controller, thread } = withReducer(transport);
+    const runId = controller.ask(THREAD, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(view).toHaveBeenCalledTimes(1);
+    expect(thread().runs[runId].status).toBe('Executing');
+    expect(thread().runs[runId].transportError?.message).toBe("network error; the run's status could not be read either");
+
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
+    expect(view).toHaveBeenCalledTimes(2);
+    expect(thread().runs[runId].status).toBe('Complete');
+    expect(thread().runs[runId].transportError).toBeNull();
+    expect(activeRunId(thread())).toBeNull();
+    // Settled: no more reads.
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 5);
+    expect(view).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not show an unstarted ask Failed while its state is unknown; a later 404 takes the question back', async () => {
+    let reads = 0;
+    const view = jest.fn(async () => {
+      reads += 1;
+      throw reads < 3 ? offline() : notStored();
+    });
+    const { transport, turns } = droppedAsk(() => [], viewRoutes(view));
+    const { controller, thread } = withReducer(transport);
+    const runId = controller.ask(THREAD, 'never started', COHORT);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(thread().runs[runId]).toMatchObject({ status: 'Planning', started: false });
+    expect(thread().runs[runId].transportError?.code).toBe('NETWORK');
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
+    expect(thread().runs[runId].status).toBe('Planning');
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
+    expect(view).toHaveBeenCalledTimes(3);
+    expect(thread().runs[runId]).toBeUndefined();
+    expect(thread().notice).toMatchObject({ code: 'UPSTREAM_ERROR', question: 'never started' });
+    expect(turns).toHaveLength(1);
+  });
+
+  it('leaves the failure standing only once the follow limit passes with no read answered', async () => {
+    const view = jest.fn(async () => {
+      throw offline();
+    });
+    const { transport } = droppedAsk(() => [], viewRoutes(view));
+    const { controller, thread } = withReducer(transport);
+    const runId = controller.ask(THREAD, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(FOLLOW_LIMIT_MS - FOLLOW_POLL_MS);
+    expect(thread().runs[runId].status).toBe('Planning');
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 2);
+    expect(thread().runs[runId]).toMatchObject({ status: 'Failed', started: false });
+    expect(activeRunId(thread())).toBeNull();
+  });
+});
+
+describe('createRunController: a turn that takes over during SESSION_BUSY polling', () => {
+  let unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  beforeEach(() => {
+    unhandled = [];
+    process.on('unhandledRejection', onUnhandled);
+  });
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+  });
+
+  it('Stop inside the poll wait ends the poll quietly, and viz reports still go standalone afterwards', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const executing = { ...J1_EXECUTING, threadId: THREAD, runId: RUN };
+    const { controller, turns } = setup((input) => {
+      const { action } = input.forwardedProps.orion;
+      if (action === 'ask') return bff('SESSION_BUSY', 409);
+      return ok(input, action === 'cancel' ? 'Complete' : 'Recorded');
+    }, [executing]);
+    const runId = controller.ask(THREAD, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_MS / 2);
+    controller.stop(THREAD, runId);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(actionsOf(turns)).toEqual(['ask', 'cancel']);
+    controller.reportViz(THREAD, report('v1'));
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS);
+    expect(actionsOf(turns)).toEqual(['ask', 'cancel', 'viz_report']);
+    // Let Node report any rejection nobody handled.
+    jest.useRealTimers();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a turn queued after the aborted poll still waits for the open warm-up (A2)', async () => {
+    let release: () => void = () => undefined;
+    const warmupOpen = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const turns: RunAgentInput[] = [];
+    const routes = viewRoutes(jest.fn(async () => ({ ...J1_EXECUTING, threadId: THREAD, runId: RUN })));
+    const transport: RunTransport = {
+      routes,
+      async *run(input): AsyncGenerator<ParseResult> {
+        turns.push(input);
+        const { action } = input.forwardedProps.orion;
+        if (action === 'warmup') {
+          await warmupOpen;
+          yield* ok(input, 'Recorded').map((event) => ({ kind: 'event' as const, event }));
+          return;
+        }
+        if (action === 'ask') throw bff('SESSION_BUSY', 409);
+        for (const event of ok(input)) yield { kind: 'event', event };
+      },
+    };
+    const controller = createRunController(transport, jest.fn());
+    controller.warmup(THREAD);
+    const runId = controller.ask(THREAD, 'q', COHORT);
+    // The warm-up holds the session past QUEUE_WAIT_MS: the ask goes, and is told SESSION_BUSY.
+    await jest.advanceTimersByTimeAsync(QUEUE_WAIT_MS);
+    expect(actionsOf(turns)).toEqual(['warmup', 'ask']);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_MS / 2);
+    controller.stop(THREAD, runId);
+    await jest.advanceTimersByTimeAsync(0);
+    // The warm-up is still open: the cancel waits for it, as every turn does.
+    expect(actionsOf(turns)).toEqual(['warmup', 'ask']);
+    release();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(actionsOf(turns)).toEqual(['warmup', 'ask', 'cancel']);
+  });
+
+  it('follows a resumed run still leased when SESSION_BUSY polling gives up', async () => {
+    const start = Date.now();
+    const view = jest.fn(async () =>
+      Date.now() - start < BUSY_POLL_LIMIT_MS + FOLLOW_POLL_MS
+        ? { ...J1_EXECUTING, threadId: THREAD, runId: RUN }
+        : { ...J1_DONE, threadId: THREAD, runId: RUN },
+    );
+    const { controller, threadActions, routes } = setup(() => bff('SESSION_BUSY', 409));
+    routes.view.mockImplementation(view);
+    controller.resume(THREAD, RUN, { action: 'retry_step', stepId: 's4' }, { status: 'Partial', nonce: null });
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_LIMIT_MS + BUSY_POLL_MS);
+    expect(threadActions().some((a) => a.type === 'turnRejected')).toBe(true);
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 3);
+    expect(threadActions().at(-1)).toEqual({ type: 'view', view: { ...J1_DONE, threadId: THREAD, runId: RUN } });
   });
 });

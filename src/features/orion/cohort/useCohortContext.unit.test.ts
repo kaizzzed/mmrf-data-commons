@@ -1,5 +1,6 @@
 import type { Cohort } from '@gen3/core';
 import { ALL_CASES, toCohortContext } from './useCohortContext';
+import { MAX_SAVED_COHORTS } from '../constants';
 
 const BLACK_PATIENTS = {
   mode: 'and',
@@ -41,6 +42,22 @@ describe('toCohortContext', () => {
       filters: BLACK_PATIENTS,
       caseCount: 334,
     });
+  });
+
+  it('sends at most 200 saved cohorts, the agent\'s cap: the active one and the most recently modified', () => {
+    const at = (i: number) => `2026-11-04T15:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000Z`;
+    // 205 cohorts, oldest first; the active one is the oldest of all.
+    const available = Array.from({ length: 205 }, (_, i) => cohort({ id: `c-${i}`, name: `Cohort ${i}`, modifiedDatetime: at(i) }));
+    const { saved } = toCohortContext(available[0], available);
+    expect(MAX_SAVED_COHORTS).toBe(200);
+    expect(saved).toHaveLength(200);
+    const ids = saved.map((s) => s.id);
+    // The store's order is kept: the active one, then the 199 newest; the five oldest others are left out.
+    expect(ids.slice(0, 2)).toEqual(['c-0', 'c-6']);
+    expect(ids.at(-1)).toBe('c-204');
+    for (const id of ['c-1', 'c-2', 'c-3', 'c-4', 'c-5']) expect(ids).not.toContain(id);
+    // At or under the cap, every cohort goes as it is.
+    expect(toCohortContext(available[0], available.slice(0, 200)).saved).toHaveLength(200);
   });
 
   it('sends a null count until the cohort bar has one', () => {
