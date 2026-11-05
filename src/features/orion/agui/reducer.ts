@@ -359,7 +359,8 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       }
       const ended = inThisInvocation ? endInvocation(state) : state;
       const { status, code } = action.result;
-      if (status === 'Warmed') return ended;
+      // Warmed and Recorded answer turns that carry no run status (warmup, a standalone viz_report).
+      if (status === 'Warmed' || status === 'Recorded') return ended;
       if (!run) return flagThread(ended, 'UNKNOWN_RUN');
       return putRun(ended, { ...run, status, code });
     }

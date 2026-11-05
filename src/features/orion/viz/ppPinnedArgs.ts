@@ -200,6 +200,10 @@ export const buildLauncherArgs = (input: PinnedViz, host: string): LauncherArgs 
 
 /** The inputs a run's viz card mounts, checked against the launcher the snapshot names. */
 export const pinnedFromVizSpec = (spec: VizSpec): PinnedViz => {
+  if (spec.pinned === null) {
+    // A snapshot trimmed to fit 32 KB drops the pinned inputs; the view route keeps them.
+    throw new Error(`Viz ${spec.vizId}: pinned inputs were trimmed from the snapshot; read the spec from the view route`);
+  }
   if (spec.launcher !== spec.pinned.kind) {
     throw new Error(`Viz ${spec.vizId}: launcher ${spec.launcher} does not match pinned ${spec.pinned.kind}`);
   }
