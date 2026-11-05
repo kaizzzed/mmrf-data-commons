@@ -27,6 +27,9 @@ const EXPECTED: Record<StreamName, string> = {
   'j1-partial': 'Partial',
   'j1-retry': 'Complete',
   'j1-stop': 'Cancelled',
+  'j2-save-pause': 'AwaitingConfirmation',
+  'j2-after-confirm': 'Complete',
+  'j2-dont-save': 'Complete',
   'j3-save-pause': 'AwaitingConfirmation',
   'j3-after-confirm': 'Complete',
   'j3-edit-at-pause': 'AwaitingConfirmation',
@@ -128,6 +131,36 @@ describe('every fixture stream, replayed and rendered through the cards', () => 
     expect(screen.getByRole('heading', { name: 'KRAS wild-type (ORION)' })).toBeInTheDocument();
   });
 
+  it('j2-save-pause: one cohort to save last, its count a chip and no eligible count, no Observed yet', () => {
+    const { actions, run } = renderRun('j2-save-pause');
+    const card = screen.getByRole('region', { name: 'Save 1 cohort' });
+    expect(within(card).getByRole('heading', { name: 'CGS high-risk (ORION)' })).toBeInTheDocument();
+    expect(within(card).getByText('CGS risk category = High risk')).toBeInTheDocument();
+    expect(within(card).queryByText(/RNA-seq eligible/)).toBeNull();
+    expect(within(card).getByText('339')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Row 1 · s2 cases_query' })).toBeInTheDocument();
+    // The save is the plan's last step (s5), the one that waits for the researcher.
+    expect(within(plan()).getAllByText('Waiting for you').length).toBeGreaterThan(0);
+    expect(plan()).toHaveTextContent(/Needs you.*s5 save_cohorts/);
+    expect(screen.queryByRole('region', { name: 'Answer' })).toBeNull();
+    within(card).getByRole('button', { name: 'Create' }).click();
+    expect(actions.create).toHaveBeenCalledWith(run, run.view?.pending, null);
+  });
+
+  it('j2-after-confirm: the save step Done, then the OncoMatrix card on the saved cohort, Complete', () => {
+    renderRun('j2-after-confirm');
+    expect(screen.queryByRole('region', { name: 'Save 1 cohort' })).toBeNull();
+    expect(within(plan()).getByText(/1 cohort saved and read back/)).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Viz v1' })).toHaveTextContent('oncomatrix');
+    expect(within(answer()).getByText('Observed')).toBeInTheDocument();
+  });
+
+  it("j2-dont-save: the one save Skipped with WRITE_SKIPPED, and the one-cohort limitation line", () => {
+    renderRun('j2-dont-save');
+    expect(within(plan()).getByText("Skipped · Not saved: you chose Don't save")).toBeInTheDocument();
+    expect(within(answer()).getByText(/You chose Don't save/)).toBeInTheDocument();
+  });
+
   it("j3-dont-save: the skipped save with its reason, and the WRITE_SKIPPED limitation", () => {
     renderRun('j3-dont-save');
     expect(within(plan()).getByText("Skipped · Not saved: you chose Don't save")).toBeInTheDocument();
@@ -169,7 +202,7 @@ describe('every fixture stream, replayed and rendered through the cards', () => 
     const card = screen.getByRole('region', { name: 'This question is not supported' });
     expect(within(card).getByText('Set Operations')).toBeInTheDocument();
     within(card).getByRole('button', { name: 'Open on this cohort' }).click();
-    expect(actions.openOnCohort).toHaveBeenCalledWith(run, 'SetOperations', ['base']);
+    expect(actions.openOnCohort).toHaveBeenCalledWith(run, 'SetOperations');
   });
 
   it('cancel-waiting: the paused run Stopped by you first, then the new question', () => {

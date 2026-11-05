@@ -1,29 +1,6 @@
 import React, { type ReactNode } from 'react';
-import type { Fact, FrozenTable, Segment } from '../agui/types';
-import { citationLabel } from '../format';
-
-const CHIP_CLASS =
-  'ml-1 inline-flex items-center rounded-full border border-base-light px-2 py-px align-baseline font-mono text-xs';
-
-/** A cell or note segment: a tool-returned number keeps its chip (FR-16), naming its row and step. */
-const SegmentText = ({ segment, facts }: { segment: Segment; facts: ReadonlyMap<string, Fact> }) => {
-  if (!segment.factId) return <span>{segment.text}</span>;
-  const fact = facts.get(segment.factId);
-  return (
-    <span data-fact-id={segment.factId}>
-      <span className="font-semibold">{segment.text}</span>
-      <span className={CHIP_CLASS}>{fact ? citationLabel(fact) : `Unresolved · ${segment.factId}`}</span>
-    </span>
-  );
-};
-
-const Segments = ({ segments, facts }: { segments: readonly Segment[]; facts: ReadonlyMap<string, Fact> }) => (
-  <>
-    {segments.map((segment, i) => (
-      <SegmentText key={i} segment={segment} facts={facts} />
-    ))}
-  </>
-);
+import type { Fact, FrozenTable } from '../agui/types';
+import { factMap, Segments } from '../cards/FactChip';
 
 export interface FrozenTableViewProps {
   frozen: FrozenTable | null;
@@ -32,14 +9,19 @@ export interface FrozenTableViewProps {
   label: string;
   /** Shown when the spec has no frozen table. */
   empty?: ReactNode;
+  /** Opens a cell's fact in the Evidence Inspector, as every chip in the thread does. */
+  onCite?: (factId: string) => void;
 }
 
-/** The cited output a card shows when its viewer is not live (contract "Viz specs", `frozen`). */
-export const FrozenTableView = ({ frozen, facts, label, empty }: FrozenTableViewProps) => {
+/**
+ * The cited output a card shows when its viewer is not live (contract "Viz specs", `frozen`): a
+ * tool-returned number keeps its chip (FR-16), naming its row and step, as everywhere in the thread.
+ */
+export const FrozenTableView = ({ frozen, facts, label, empty, onCite }: FrozenTableViewProps) => {
   if (!frozen) {
     return <p className="text-sm">{empty ?? 'This chart has no cited table to show.'}</p>;
   }
-  const byId = new Map(facts.map((f) => [f.id, f]));
+  const byId = factMap(facts);
   return (
     <div className="flex flex-col gap-1" data-testid="orion-viz-frozen">
       <div className="overflow-x-auto">
@@ -58,7 +40,7 @@ export const FrozenTableView = ({ frozen, facts, label, empty }: FrozenTableView
               <tr key={r}>
                 {row.map((cell, c) => (
                   <td key={c} className="border-b border-base-lightest px-2 py-1">
-                    <SegmentText segment={cell} facts={byId} />
+                    <Segments segments={[cell]} facts={byId} onCite={onCite} />
                   </td>
                 ))}
               </tr>
@@ -68,7 +50,7 @@ export const FrozenTableView = ({ frozen, facts, label, empty }: FrozenTableView
       </div>
       {frozen.note && (
         <p className="text-xs" data-testid="orion-viz-frozen-note">
-          <Segments segments={frozen.note} facts={byId} />
+          <Segments segments={frozen.note} facts={byId} onCite={onCite} />
         </p>
       )}
     </div>

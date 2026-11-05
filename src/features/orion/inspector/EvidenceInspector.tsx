@@ -2,11 +2,13 @@ import React, { useEffect, useId, useRef } from 'react';
 import { Button, CloseButton } from '@mantine/core';
 import type { RunState } from '../agui/reducer';
 import type { RunRoutes } from '../agui/transport';
-import type { CallRecord, Fact, JsonValue, RunRecord, Step } from '../agui/types';
+import type { CallRecord, Fact, JsonValue, RunRecord } from '../agui/types';
 import { StepStatusLabel } from '../components/StatusLabel';
+import { callOrigin, callsOf } from '../calls';
 import { citationLabel, formatDuration, formatFact } from '../format';
+import { recordFilename } from '../server/routes';
 import { resolvePointer } from './jsonPointer';
-import { useRunRecord } from './useRunRecord';
+import { useRunRecord, type RecordState } from './useRunRecord';
 
 /** What the Inspector shows: a step of a run, and one of its facts when a chip opened it. */
 export interface InspectorTarget {
@@ -33,9 +35,6 @@ const JsonBlock = ({ label, value }: { label: string; value: JsonValue }) => {
     </details>
   );
 };
-
-/** A Reused step's calls are its origin's: the plan version and step whose calls produced it. */
-const originOf = (step: Step, planVersion: number) => step.reusedFrom ?? { planVersion, stepId: step.id };
 
 const CallItem = ({ call }: { call: CallRecord }) => (
   <li className="flex flex-col gap-1 border-t border-base-lighter pt-2 first:border-t-0 first:pt-0">
@@ -99,6 +98,12 @@ const FactDetail = ({ fact, record }: { fact: Fact; record: RunRecord | null }) 
   );
 };
 
+const UNAVAILABLE_TEXT: Record<Extract<RecordState, { state: 'unavailable' }>['reason'], string> = {
+  'no-route': 'The run record is not available in a fixture replay.',
+  'not-stored': 'The run record is not available yet.',
+  'signed-out': 'The run record cannot be read: your session has ended. Sign in again to see it.',
+};
+
 export interface EvidenceInspectorProps {
   threadId: string;
   target: InspectorTarget;
@@ -122,8 +127,7 @@ export const EvidenceInspector = ({ threadId, target, run, routes, onSelect, onC
   const stepFacts = view?.facts.filter((f) => f.stepId === target.stepId) ?? [];
   const recordState = useRunRecord(routes, target.runId, threadId, view?.revision ?? null);
   const record = recordState.state === 'ready' ? recordState.record : null;
-  const origin = step ? originOf(step, view?.plan?.version ?? 1) : null;
-  const calls = record && origin ? record.calls.filter((c) => c.planVersion === origin.planVersion && c.stepId === origin.stepId) : [];
+  const calls = record && view && step ? callsOf(record.calls, callOrigin(view, step.id)) : [];
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -196,13 +200,7 @@ export const EvidenceInspector = ({ threadId, target, run, routes, onSelect, onC
           <section aria-label="Calls" className="flex flex-col gap-1">
             <h3 className="text-sm font-semibold">Calls</h3>
             {recordState.state === 'loading' && <p className="text-xs">Reading the run record…</p>}
-            {recordState.state === 'unavailable' && (
-              <p className="text-xs">
-                {recordState.reason === 'no-route'
-                  ? 'The run record is not available in a fixture replay.'
-                  : 'The run record is not available yet.'}
-              </p>
-            )}
+            {recordState.state === 'unavailable' && <p className="text-xs">{UNAVAILABLE_TEXT[recordState.reason]}</p>}
             {recordState.state === 'error' && <p className="text-xs">The run record could not be read: {recordState.message}</p>}
             {record && calls.length === 0 && <p className="text-xs">The record has no call for this step yet.</p>}
             {calls.length > 0 && (
@@ -219,7 +217,7 @@ export const EvidenceInspector = ({ threadId, target, run, routes, onSelect, onC
         <a
           className="text-sm underline"
           href={routes.recordDownloadHref(target.runId, threadId)}
-          download={`orion-run-${target.runId}.json`}
+          download={recordFilename(target.runId)}
         >
           Export the run record as JSON
         </a>

@@ -12,6 +12,7 @@ import type {
   VizSpec,
   VolcanoPins,
 } from '../agui/types';
+import { sha256Hex } from '../cohort/sha256';
 
 export const PP_DSLABEL = 'MMRF';
 export const PP_GENOME = 'hg38';
@@ -210,7 +211,13 @@ export const pinnedFromVizSpec = (spec: VizSpec): PinnedViz => {
   return spec.pinned;
 };
 
-// ------------------------------------------------------------------ parity hash
+// ------------------------------------------------------------------ JSON and the parity hash
+
+export type JsonObject = { [key: string]: JsonValue };
+
+/** A JSON object (not null, not an array). */
+export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
+  value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value);
 
 /**
  * The agent's Python prints the same digits as JavaScript only for integers and for decimals
@@ -248,19 +255,9 @@ export const pinnedDocument = (pinned: PinnedViz): JsonValue =>
   // optional fields left undefined.
   ({ schema: PINNED_SCHEMA, ...normalizePinned(pinned) }) as unknown as JsonValue;
 
-const toHex = (buffer: ArrayBuffer): string =>
-  Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join('');
-
-/** sha256 (lowercase hex) of a string's UTF-8 bytes. */
-export const sha256Hex = async (text: string, subtle: SubtleCrypto = globalThis.crypto.subtle): Promise<string> =>
-  toHex(await subtle.digest('SHA-256', new TextEncoder().encode(text)));
-
-/** sha256 of the canonical pinned document, for the parity badge (C-21). */
-export const pinnedHash = (pinned: PinnedViz, subtle?: SubtleCrypto): Promise<string> => {
-  // Built first, so a number outside the contract's range rejects rather than hashing.
-  try {
-    return sha256Hex(canonicalJson(pinnedDocument(pinned)), subtle);
-  } catch (error) {
-    return Promise.reject(error);
-  }
-};
+/**
+ * sha256 of the canonical pinned document, for the parity badge (C-21). Synchronous, like every
+ * browser-side hash (cohort/sha256.ts): SubtleCrypto is missing outside secure contexts. Throws on
+ * a number outside the contract's range.
+ */
+export const pinnedHash = (pinned: PinnedViz): string => sha256Hex(canonicalJson(pinnedDocument(pinned)));

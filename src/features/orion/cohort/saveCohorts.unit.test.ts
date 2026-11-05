@@ -112,6 +112,27 @@ describe('saveCohorts (save_cohorts)', () => {
     expect(save(null, args).confirm.saved[1]).toMatchObject({ cohortId: 'c-named', reused: true });
   });
 
+  it('reads back a null hash when the store holds filters ORION cannot read (WRITE_VERIFY_FAILED)', () => {
+    const { store, ledger, log } = setup();
+    const unreadable = {
+      mode: 'or' as const,
+      root: {
+        'demographic.race': { operator: 'includes', field: 'demographic.race', operands: ['white'] },
+        'diagnoses.iss_stage': { operator: 'includes', field: 'diagnoses.iss_stage', operands: ['Stage I'] },
+      },
+    };
+    const port = {
+      ...store.port,
+      get: (id: string) => {
+        const cohort = store.port.get(id);
+        return cohort && { ...cohort, filters: { ...cohort.filters, case_centric: unreadable } };
+      },
+    };
+    const result = saveCohorts({ args: J3_ARGS, makeActive: null, threadId: THREAD, runId: RUN }, { port, ledger, log });
+    expect(result.confirm.saved.map((s) => s.defSha256)).toEqual([null, null]);
+    expect(result.confirm.saved.map((s) => s.ref)).toEqual(['kras_wt', 'kras_mut']);
+  });
+
   it('reads back the unique name createNewCohort gives a clashing one', () => {
     const { save } = setup([{ id: 'c-clash', name: 'kras mutated (orion)', filters: { mode: 'and', root: {} } }]);
     const result = save();

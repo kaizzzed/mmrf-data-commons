@@ -1,4 +1,4 @@
-import { createHash, webcrypto } from 'crypto';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import type { PinnedViz, StateSnapshotEvent, VizSpec } from '../agui/types';
@@ -11,7 +11,6 @@ import {
   pinnedHash,
 } from './ppPinnedArgs';
 
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 
 /** orion/contracts/fixtures/viz-pinned-vectors.json, copied byte for byte. */
 interface PinnedVector {
@@ -25,7 +24,7 @@ const VECTORS: PinnedVector[] = (
     readFileSync(path.join(__dirname, '__fixtures__', 'viz-pinned-vectors.json'), 'utf8'),
   ) as { vectors: PinnedVector[] }
 ).vectors;
-const hash = (pinned: PinnedViz) => pinnedHash(pinned, subtle);
+const hash = (pinned: PinnedViz) => pinnedHash(pinned);
 const HOST = '/protein-paint';
 
 const survival: PinnedViz = {
@@ -279,5 +278,17 @@ describe('pinnedHash', () => {
 
   it('returns 64 lowercase hex characters', async () => {
     expect(await hash(deDirect)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('hashes with no SubtleCrypto, as on a sandbox page served over plain http', () => {
+    // SubtleCrypto exists only in secure contexts; the parity badge must not depend on it.
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+    Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true });
+    try {
+      expect(pinnedHash(survival)).toBe('660a67ada3be378c148e83443173994dccfad7e7bb579eaac5a4f1f1f3d7f5de');
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'crypto', original);
+      else Reflect.deleteProperty(globalThis, 'crypto');
+    }
   });
 });

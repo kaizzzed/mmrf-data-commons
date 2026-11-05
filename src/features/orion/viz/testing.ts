@@ -1,23 +1,13 @@
 // Test-only helpers for the viz cards; nothing in the app imports this module.
 
-import { readFileSync } from 'fs';
-import path from 'path';
-import type { AguiEvent, JsonValue, PinnedViz, RunView, VizSpec } from '../agui/types';
+import type { JsonValue, PinnedViz, RunView, VizSpec } from '../agui/types';
+import { streamViews, type StreamName } from '../testing';
 import { caseIdOfSample } from './spike/krasGroups';
 
-export type FixtureName = 'j1-complete' | 'j3-after-confirm' | 'j3-deinput' | 'j3-dont-save' | 'oncomatrix';
-
-/** The events of an agui/__fixtures__ stream, frame by frame. */
-export const fixtureStream = (name: FixtureName): AguiEvent[] =>
-  readFileSync(path.join(__dirname, '..', 'agui', '__fixtures__', `${name}.events.jsonl`), 'utf8')
-    .split('\n')
-    .filter((line) => line.startsWith('data: '))
-    .map((line) => JSON.parse(line.slice(6)) as AguiEvent);
-
 /** The last snapshot of a fixture stream: the run as it ended. */
-export const lastView = (name: FixtureName): RunView => {
-  const snapshots = fixtureStream(name).flatMap((e) => (e.type === 'STATE_SNAPSHOT' ? [e.snapshot] : []));
-  return snapshots[snapshots.length - 1];
+export const lastView = (name: StreamName): RunView => {
+  const views = streamViews(name);
+  return views[views.length - 1];
 };
 
 /** The run's only viz spec. */

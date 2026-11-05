@@ -41,7 +41,7 @@ import { ThreadView } from './components/ThreadView';
 import { FIXTURE_NOTICE, SYNTHETIC_NOTICE } from './constants';
 import { useRunController, type ResumeAction, type ResumeExpectation } from './controller/useRunController';
 import { formatScope } from './format';
-import { handoffTarget, openInTool } from './handoff/handoff';
+import { handoffFor, openInTool, scopeHandoff, type Handoff } from './handoff/handoff';
 import { mantineNotifier, type Notifier } from './handoff/notifier';
 import { newId } from './ids';
 import { EvidenceInspector, type InspectorTarget } from './inspector/EvidenceInspector';
@@ -49,7 +49,7 @@ import { noticeText } from './notices';
 import { describeRunChange } from './state/announce';
 import { loadTab, saveTab } from './state/storage';
 import { activeThread, createTab, tabReducer, threadRuns, type TabState } from './state/tab';
-import { DEFAULT_VIZ_SERVICES, VizServicesContext, type VizServices } from './viz/vizServices';
+import { citedCallLoader, DEFAULT_VIZ_SERVICES, VizServicesContext, type VizServices } from './viz/vizServices';
 
 // Day 1 spike only (`spike=pp` with NEXT_PUBLIC_ORION_SPIKE=1); loads ProteinPaint just for that page.
 const PpSpike = lazy(() => import('./viz/spike/PpSpike'));
@@ -213,6 +213,13 @@ const AssistantMain = ({
     [port, log, notifier, openApp],
   );
 
+  /** A hand-off click: a hand-off that is off does nothing; otherwise the tool opens on `cohortId`. */
+  const handOff = (run: RunState, handoff: Handoff, cohortId: string | null) => {
+    if (handoff.disabledReason) return;
+    const { appId, cohortNames } = handoff;
+    openInTool(handoffDeps, { appId, cohortId, cohortName: cohortNames[0] ?? null, threadId, runId: run.runId });
+  };
+
   /** A Stop no snapshot has confirmed yet goes again ahead of the next turn (design "Data model"). */
   const resendStops = () => {
     for (const run of runs) {
@@ -361,15 +368,14 @@ const AssistantMain = ({
     },
     retry: (run, stepId) => resume(run, { action: 'retry_step', stepId }),
     inspect,
-    openOnCohort: (run, appId, cohortRefs) => {
-      const target = run.view ? handoffTarget(run.view, cohortRefs) : { cohortId: null, cohortName: null, disabledReason: null };
-      if (target.disabledReason) return;
-      openInTool(handoffDeps, { appId, cohortId: target.cohortId, cohortName: target.cohortName, threadId, runId: run.runId });
+    openOnCohort: (run, appId) => {
+      if (!run.view) return;
+      const handoff = scopeHandoff(appId, run.view);
+      handOff(run, handoff, handoff.cohortId);
     },
     openInTool: (run, spec, appId, cohortId) => {
-      // Don't save turns hand-off off for cards pinned to the unsaved groups (C-16).
-      if (run.view && handoffTarget(run.view, spec.cohortRefs).disabledReason) return;
-      openInTool(handoffDeps, { appId, cohortId, threadId, runId: run.runId });
+      // The card decided with handoffFor too; Don't save keeps it off here as well (C-16).
+      if (run.view) handOff(run, handoffFor({ ...spec, appId }, spec.pinned, run.view), cohortId);
     },
     openLink: (link) => openApp(link.appId),
     reportViz: (report) => controller.reportViz(threadId, report),
@@ -381,9 +387,11 @@ const AssistantMain = ({
     },
   };
 
+  // The cards read the run record through the transport's routes (none in a replay), and know the
+  // active cohort, so their hand-off reads "Make active and open" when it switches.
   const vizServices = useMemo<VizServices>(
-    () => ({ ...DEFAULT_VIZ_SERVICES, activeCohortId: active.id }),
-    [active.id],
+    () => ({ ...DEFAULT_VIZ_SERVICES, activeCohortId: active.id, loadCitedCall: citedCallLoader(controller.routes) }),
+    [active.id, controller.routes],
   );
 
   return (

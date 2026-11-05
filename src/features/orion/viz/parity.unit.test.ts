@@ -1,4 +1,3 @@
-import { webcrypto } from 'crypto';
 import type { PinnedViz } from '../agui/types';
 import {
   checkParity,
@@ -12,7 +11,6 @@ import {
 import { pinnedHash } from './ppPinnedArgs';
 import { lastView, onlySpec } from './testing';
 
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 
 describe('checkParity', () => {
   it.each(['j1-complete', 'j3-after-confirm', 'oncomatrix', 'j3-dont-save'] as const)(
@@ -20,7 +18,7 @@ describe('checkParity', () => {
     async (name) => {
       const spec = onlySpec(lastView(name));
       if (!spec.pinned) throw new Error('fixture spec is pinned');
-      const parity = await checkParity(spec.pinned, spec, subtle);
+      const parity = await checkParity(spec.pinned, spec);
       expect(parity).toEqual({ state: 'match', recomputed: spec.pinnedHash, reason: null });
       expect(pinnedHashVerified(parity)).toBe(true);
     },
@@ -29,7 +27,7 @@ describe('checkParity', () => {
   it('says the chart would not reproduce the cited request when only requestPinnedHash differs', async () => {
     const spec = onlySpec(lastView('j1-complete'));
     if (!spec.pinned) throw new Error('fixture spec is pinned');
-    const parity = await checkParity(spec.pinned, { ...spec, requestPinnedHash: '0'.repeat(64) }, subtle);
+    const parity = await checkParity(spec.pinned, { ...spec, requestPinnedHash: '0'.repeat(64) });
     expect(parity.state).toBe('requestDiffers');
     expect(pinnedHashVerified(parity)).toBe(false);
   });
@@ -37,9 +35,9 @@ describe('checkParity', () => {
   it('flags inputs that do not hash to the recorded pinnedHash', async () => {
     const spec = onlySpec(lastView('j1-complete'));
     const tampered: PinnedViz = { kind: 'survival', filter0: { and: [] }, term: 'overall_survival', overlay: 'cgs_risk_category' };
-    const parity = await checkParity(tampered, spec, subtle);
+    const parity = await checkParity(tampered, spec);
     expect(parity.state).toBe('pinnedDiffers');
-    expect(parity.recomputed).toBe(await pinnedHash(tampered, subtle));
+    expect(parity.recomputed).toBe(await pinnedHash(tampered));
     expect(pinnedHashVerified(parity)).toBe(false);
   });
 
@@ -54,7 +52,7 @@ describe('checkParity', () => {
       method: 'wilcoxon',
       volcano: { pValue: 0.00005 },
     };
-    const parity = await checkParity(unhashable, spec, subtle);
+    const parity = await checkParity(unhashable, spec);
     expect(parity.state).toBe('unchecked');
     expect(parity.reason).toMatch(/Cannot hash/);
     expect(pinnedHashVerified(parity)).toBeNull();

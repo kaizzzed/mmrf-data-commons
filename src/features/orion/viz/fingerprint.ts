@@ -4,9 +4,9 @@
 // why, when it differs from the run's environment.fingerprintSha256.
 
 import { FINGERPRINT_SCHEMA, type JsonValue } from '../agui/types';
-import { canonicalJson, sha256Hex } from './ppPinnedArgs';
+import { sha256Hex } from '../cohort/sha256';
+import { canonicalJson, isJsonObject } from './ppPinnedArgs';
 
-type JsonObject = { [key: string]: JsonValue };
 
 export class FingerprintError extends Error {
   constructor(message: string) {
@@ -40,11 +40,9 @@ export interface FingerprintDocument {
   ranking: RankedGene[];
 }
 
-const isObject = (value: JsonValue | undefined): value is JsonObject =>
-  value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value);
 
 const read = (value: JsonValue, key: string, source: string): JsonValue => {
-  if (!isObject(value) || !(key in value)) throw new FingerprintError(`${source} has no ${key}`);
+  if (!isJsonObject(value) || !(key in value)) throw new FingerprintError(`${source} has no ${key}`);
   return value[key];
 };
 
@@ -54,7 +52,7 @@ const read = (value: JsonValue, key: string, source: string): JsonValue => {
  */
 export const fingerprintDocument = (sources: FingerprintSources): FingerprintDocument => {
   const info = read(sources.healthcheck, 'versionInfo', 'The ProteinPaint healthcheck');
-  if (!isObject(info)) throw new FingerprintError('The ProteinPaint healthcheck carries no versionInfo object');
+  if (!isJsonObject(info)) throw new FingerprintError('The ProteinPaint healthcheck carries no versionInfo object');
   return {
     schema: FINGERPRINT_SCHEMA,
     sandbox: {
@@ -71,14 +69,9 @@ export const fingerprintDocument = (sources: FingerprintSources): FingerprintDoc
   };
 };
 
-/** sha256 of the canonical JSON (portable numbers) of the fingerprint document. */
-export const fingerprintSha256 = (document: FingerprintDocument, subtle?: SubtleCrypto): Promise<string> => {
-  try {
-    return sha256Hex(canonicalJson(document as unknown as JsonValue), subtle);
-  } catch (error) {
-    return Promise.reject(error);
-  }
-};
+/** sha256 of the canonical JSON (portable numbers) of the fingerprint document; throws on a non-portable number. */
+export const fingerprintSha256 = (document: FingerprintDocument): string =>
+  sha256Hex(canonicalJson(document as unknown as JsonValue));
 
 /** ProteinPaint's dt for SNV/indel; the sandbox has no other mutation class. */
 const DT_SNV_INDEL = 1;
@@ -93,9 +86,9 @@ export const rankingFromTopMutatedGenes = (response: JsonValue): RankedGene[] =>
   return genes.map((row, i) => {
     const gene = read(row, 'gene', `topMutatedGenes .genes[${i}]`);
     if (typeof gene !== 'string') throw new FingerprintError(`topMutatedGenes .genes[${i}].gene is not a string`);
-    const stats = isObject(row) && Array.isArray(row.mutationStat) ? row.mutationStat : [];
-    const snv = stats.find((s) => isObject(s) && s.dt === DT_SNV_INDEL);
-    const count = isObject(snv) ? snv.count : 0;
+    const stats = isJsonObject(row) && Array.isArray(row.mutationStat) ? row.mutationStat : [];
+    const snv = stats.find((s) => isJsonObject(s) && s.dt === DT_SNV_INDEL);
+    const count = isJsonObject(snv) ? snv.count : 0;
     if (typeof count !== 'number') throw new FingerprintError(`topMutatedGenes .genes[${i}] count is not a number`);
     return { gene, cases: count };
   });
@@ -140,7 +133,6 @@ const readJson = async (fetchFn: typeof fetch, url: string, init?: RequestInit):
 export const computeLocalFingerprint = async (
   endpoints: FingerprintEndpoints,
   fetchFn: typeof fetch = (input, init) => globalThis.fetch(input, init),
-  subtle?: SubtleCrypto,
 ): Promise<LocalFingerprint> => {
   const sandboxStatus = await readJson(fetchFn, endpoints.sandboxStatus);
   const analysisVersion = await readJson(fetchFn, endpoints.analysisVersion);
@@ -153,5 +145,5 @@ export const computeLocalFingerprint = async (
     }),
   );
   const document = fingerprintDocument({ sandboxStatus, analysisVersion, healthcheck, ranking });
-  return { document, sha256: await fingerprintSha256(document, subtle) };
+  return { document, sha256: fingerprintSha256(document) };
 };

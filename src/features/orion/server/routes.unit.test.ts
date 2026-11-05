@@ -3,8 +3,7 @@ import {
   aguiUrl,
   BFF_ERROR_CODES,
   BFF_ERROR_STATUS,
-  BFF_ROUTE_ERROR_HANDLING,
-  isContractBffError,
+  isEventStream,
   parseBffError,
   readBffError,
   recordFilename,
@@ -39,8 +38,10 @@ describe('BFF route helpers (browser side)', () => {
       UPSTREAM_UNAVAILABLE: 503,
       UPSTREAM_TIMEOUT: 504,
     });
-    for (const code of BFF_ERROR_CODES) expect(BFF_ROUTE_ERROR_HANDLING[code]).toBe(BFF_ERROR_HANDLING[code]);
-    expect(BFF_ROUTE_ERROR_HANDLING.UNAUTHENTICATED).toBe('reject');
+    // The table's codes, each with the browser's handling (contract "Client handling of BFF errors").
+    expect(Object.keys(BFF_ERROR_STATUS).sort()).toEqual([...BFF_ERROR_CODES].sort());
+    expect(Object.keys(BFF_ERROR_HANDLING).sort()).toEqual([...BFF_ERROR_CODES].sort());
+    expect(BFF_ERROR_HANDLING.UNAUTHENTICATED).toBe('reject');
   });
 
   it('parses BffError bodies and nothing else', () => {
@@ -49,7 +50,6 @@ describe('BFF route helpers (browser side)', () => {
     });
     const unauthenticated = parseBffError({ error: { code: 'UNAUTHENTICATED', message: 'Sign in.' }, extra: 1 });
     expect(unauthenticated).toEqual({ error: { code: 'UNAUTHENTICATED', message: 'Sign in.' } });
-    expect(unauthenticated && isContractBffError(unauthenticated)).toBe(false);
     for (const body of [
       null,
       'SESSION_BUSY',
@@ -60,6 +60,13 @@ describe('BFF route helpers (browser side)', () => {
     ]) {
       expect(parseBffError(body)).toBeNull();
     }
+  });
+
+  it('recognises the agui stream by its media type, whatever its parameters', () => {
+    expect(isEventStream('text/event-stream; charset=utf-8')).toBe(true);
+    expect(isEventStream('Text/Event-Stream')).toBe(true);
+    expect(isEventStream('application/json; charset=utf-8')).toBe(false);
+    expect(isEventStream(null)).toBe(false);
   });
 
   it('reads the BffError of a JSON error response, and never an event stream', async () => {

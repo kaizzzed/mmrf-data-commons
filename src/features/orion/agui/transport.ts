@@ -1,18 +1,18 @@
 import {
   aguiUrl,
-  BFF_ROUTE_ERROR_HANDLING,
+  isEventStream,
   readBffError,
   recordUrl,
   viewUrl,
   type BffErrorAction,
-  type BffRouteErrorCode,
 } from '../server/routes';
 import { createSseParser, type ParseResult } from './sseParser';
 import {
+  BFF_ERROR_HANDLING,
   END_STATUSES,
-  ORION_ROUTES,
   WAITING_STATUSES,
   type AguiEvent,
+  type BffErrorCode,
   type OrionActionName,
   type RunAgentInput,
   type RunErrorEvent,
@@ -24,9 +24,8 @@ import {
   type StepStatus,
 } from './types';
 
-// Route paths and BffError parsing come from the BFF's own client helpers (server/routes.ts), so
-// both sides agree on them.
-export const AGUI_ROUTE = ORION_ROUTES.agui;
+// Route paths, the stream check and BffError parsing come from the BFF's own client helpers
+// (server/routes.ts), so both sides agree on them.
 
 export type TransportErrorCode =
   | 'NETWORK'
@@ -40,14 +39,14 @@ export type TransportErrorCode =
 export class TransportError extends Error {
   readonly code: TransportErrorCode;
   readonly status: number | null;
-  /** Set exactly when code is BFF_ERROR: a contract code, or the BFF's session check (UNAUTHENTICATED). */
-  readonly bffCode: BffRouteErrorCode | null;
+  /** Set exactly when code is BFF_ERROR: the contract code the BFF's JSON error body carries. */
+  readonly bffCode: BffErrorCode | null;
 
   constructor(
     code: TransportErrorCode,
     message: string,
     status: number | null = null,
-    bffCode: BffRouteErrorCode | null = null,
+    bffCode: BffErrorCode | null = null,
   ) {
     super(message);
     this.name = 'TransportError';
@@ -58,7 +57,7 @@ export class TransportError extends Error {
 }
 
 /** What the browser does with a BFF error code (contract "Client handling of BFF errors"). */
-export const bffHandling = (code: BffRouteErrorCode): BffErrorAction => BFF_ROUTE_ERROR_HANDLING[code];
+export const bffHandling = (code: BffErrorCode): BffErrorAction => BFF_ERROR_HANDLING[code];
 
 /**
  * One turn: posts the input and yields each parsed frame. Malformed frames arrive
@@ -83,11 +82,6 @@ export interface RunRoutes {
 const aborted = (): TransportError =>
   new TransportError('ABORTED', 'The request was stopped');
 
-const isEventStream = (response: Response): boolean =>
-  (response.headers.get('content-type') ?? '')
-    .toLowerCase()
-    .startsWith('text/event-stream');
-
 const describeResponse = (response: Response, expected: string): string => {
   if (response.type === 'opaqueredirect') return 'The server redirected the request';
   const type = response.headers.get('content-type') || 'no content type';
@@ -103,9 +97,8 @@ const responseError = async (response: Response, expected: string, fallback: Tra
     : new TransportError(fallback, describeResponse(response, expected), response.status);
 };
 
-const basePath = (): string => process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-
 export interface HttpRoutesOptions {
+  /** Defaults to NEXT_PUBLIC_BASE_PATH (server/routes.ts). */
   basePath?: string;
   fetchImpl?: typeof fetch;
 }
@@ -116,7 +109,7 @@ const isRunView = (value: unknown): value is RunView =>
 const isRunRecord = (value: unknown): value is RunRecord =>
   typeof value === 'object' && value !== null && (value as { schema?: unknown }).schema === 'orion.run-record/v1';
 
-export const httpRoutes = ({ basePath: base = basePath(), fetchImpl }: HttpRoutesOptions = {}): RunRoutes => {
+export const httpRoutes = ({ basePath, fetchImpl }: HttpRoutesOptions = {}): RunRoutes => {
   const getJson = async <T>(path: string, signal: AbortSignal | undefined, check: (value: unknown) => value is T) => {
     const doFetch = fetchImpl ?? fetch;
     let response: Response;
@@ -146,9 +139,9 @@ export const httpRoutes = ({ basePath: base = basePath(), fetchImpl }: HttpRoute
   };
 
   return {
-    view: (runId, threadId, signal) => getJson(viewUrl(runId, { basePath: base, threadId }), signal, isRunView),
-    record: (runId, threadId, signal) => getJson(recordUrl(runId, { basePath: base, threadId }), signal, isRunRecord),
-    recordDownloadHref: (runId, threadId) => recordUrl(runId, { basePath: base, threadId, download: true }),
+    view: (runId, threadId, signal) => getJson(viewUrl(runId, { basePath, threadId }), signal, isRunView),
+    record: (runId, threadId, signal) => getJson(recordUrl(runId, { basePath, threadId }), signal, isRunRecord),
+    recordDownloadHref: (runId, threadId) => recordUrl(runId, { basePath, threadId, download: true }),
   };
 };
 
@@ -185,7 +178,7 @@ export const httpTransport = ({
         err instanceof Error ? err.message : 'Network error',
       );
     }
-    if (!response.ok || !isEventStream(response)) {
+    if (!response.ok || !isEventStream(response.headers.get('content-type'))) {
       throw await responseError(response, 'an event stream', 'NOT_EVENT_STREAM');
     }
     if (!response.body) throw new TransportError('NO_BODY', 'The response has no body');

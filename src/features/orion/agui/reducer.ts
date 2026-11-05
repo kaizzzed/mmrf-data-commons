@@ -1,4 +1,3 @@
-import type { BffRouteErrorCode } from '../server/routes';
 import type { SseParseError } from './sseParser';
 import {
   END_STATUSES,
@@ -6,6 +5,7 @@ import {
   REJECTION_CODES,
   WAITING_STATUSES,
   type AguiEvent,
+  type BffErrorCode,
   type OrionActionName,
   type OrionCode,
   type RejectionCode,
@@ -69,7 +69,7 @@ export interface Invocation {
 }
 
 /** Why a turn was turned away: an agent rejection, or the BFF's own error code. */
-export type NoticeCode = RejectionCode | BffRouteErrorCode;
+export type NoticeCode = RejectionCode | BffErrorCode;
 
 /** A turn the server rejected. It created no run and changed none. */
 export interface ThreadNotice {

@@ -1,4 +1,4 @@
-import { createHash, webcrypto } from 'crypto';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import type { JsonValue, PinnedKind, PinnedViz } from '../agui/types';
@@ -11,7 +11,6 @@ import {
   roundHalfAwayFromZero,
 } from './requestPinned';
 
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 
 /** orion/contracts/fixtures/request-pinned-vectors.json, copied byte for byte. */
 interface RequestPinnedVector {
@@ -51,10 +50,10 @@ describe('request-pinned vectors (orion/contracts/fixtures/request-pinned-vector
       expect(canonicalJson(pinnedDocument(derived))).toBe(canonicalJson(pinnedDocument(vector.pinned)));
       const canonical = canonicalJson(pinnedDocument(derived));
       expect(createHash('sha256').update(canonical, 'utf8').digest('hex')).toBe(vector.requestPinnedHash);
-      expect(await requestPinnedHash(vector.launcher, vector.request, vector.observed, subtle)).toBe(
+      expect(await requestPinnedHash(vector.launcher, vector.request, vector.observed)).toBe(
         vector.requestPinnedHash,
       );
-      expect(await pinnedHash(vector.pinned, subtle)).toBe(vector.requestPinnedHash);
+      expect(await pinnedHash(vector.pinned)).toBe(vector.requestPinnedHash);
     },
   );
 });
@@ -64,7 +63,7 @@ describe('deriveRequestPinned', () => {
     const [vector] = VECTORS.filter((v) => v.launcher === 'deDirect');
     const request = vector.request as { [key: string]: JsonValue };
     const padded = { ...request, extra: 'ignored', groups: (request.groups as JsonValue[]).map((g) => g) };
-    expect(await requestPinnedHash('deDirect', padded, undefined, subtle)).toBe(vector.requestPinnedHash);
+    expect(await requestPinnedHash('deDirect', padded, undefined)).toBe(vector.requestPinnedHash);
   });
 
   it('pins no volcano without thresholds, and the -log10 cutoff with them', () => {

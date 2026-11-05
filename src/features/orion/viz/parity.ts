@@ -40,14 +40,10 @@ export const parityOf = (recomputed: string, spec: Pick<VizSpec, 'pinnedHash' | 
 
 export const unchecked = (reason: string): Parity => ({ state: 'unchecked', recomputed: null, reason });
 
-/** Recomputes pinnedHash and compares it with the spec's two hashes; never rejects. */
-export const checkParity = async (
-  pinned: PinnedViz,
-  spec: Pick<VizSpec, 'pinnedHash' | 'requestPinnedHash'>,
-  subtle?: SubtleCrypto,
-): Promise<Parity> => {
+/** Recomputes pinnedHash and compares it with the spec's two hashes; never throws. */
+export const checkParity = (pinned: PinnedViz, spec: Pick<VizSpec, 'pinnedHash' | 'requestPinnedHash'>): Parity => {
   try {
-    return parityOf(await pinnedHash(pinned, subtle), spec);
+    return parityOf(pinnedHash(pinned), spec);
   } catch (error) {
     return unchecked(error instanceof Error ? error.message : String(error));
   }

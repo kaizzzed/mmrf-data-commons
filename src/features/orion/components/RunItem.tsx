@@ -7,9 +7,9 @@ import { ClarificationCard } from '../cards/ClarificationCard';
 import { ConfirmationCard } from '../cards/ConfirmationCard';
 import { ConsentCard } from '../cards/ConsentCard';
 import { FailedCard } from '../cards/FailedCard';
-import { LimitationCard } from '../cards/LimitationCard';
+import { LimitationCard, nearestAppOf } from '../cards/LimitationCard';
 import { PlanCard } from '../cards/PlanCard';
-import { handoffTarget } from '../handoff/handoff';
+import { scopeHandoff } from '../handoff/handoff';
 import { VizCard } from '../viz/VizCard';
 import { useRunActions } from './RunActions';
 
@@ -40,7 +40,8 @@ export const RunItem = ({ run }: RunItemProps) => {
   };
   const inspectStep = (stepId: string) => actions.inspect({ runId: run.runId, stepId, factId: null });
   const canRetry = (step: Step) => isLatest && status === 'Partial' && step.status === 'Failed' && step.kind !== 'client';
-  const handoff = view ? handoffTarget(view, ['base']) : null;
+  const nearestApp = view ? nearestAppOf(view.limitations) : undefined;
+  const scopeHandoffReason = view && nearestApp ? scopeHandoff(nearestApp.appId, view).disabledReason : null;
 
   return (
     <article aria-label={run.question || 'Run'} className="flex flex-col gap-3">
@@ -97,7 +98,8 @@ export const RunItem = ({ run }: RunItemProps) => {
         />
       )}
       {view?.vizSpecs.map((spec) => (
-        // Esc inside a viewer belongs to ProteinPaint's menus, never to Stop.
+        // Esc inside a viewer belongs to ProteinPaint's menus, never to Stop. One RunItem holds one
+        // run, so the viz id alone keys its card (a card reads its spec once).
         <div key={spec.vizId} data-orion-viz>
           <VizCard
             threadId={view.threadId}
@@ -106,6 +108,7 @@ export const RunItem = ({ run }: RunItemProps) => {
             onReport={actions.reportViz}
             onOpenInTool={(appId, cohortId) => actions.openInTool(run, spec, appId, cohortId)}
             loadUntrimmedSpec={actions.loadUntrimmedSpec}
+            onCite={cite}
           />
         </div>
       ))}
@@ -125,8 +128,8 @@ export const RunItem = ({ run }: RunItemProps) => {
           facts={view.facts}
           notice={view.notice}
           onCite={cite}
-          onOpenOnCohort={(appId) => actions.openOnCohort(run, appId, ['base'])}
-          handoffDisabledReason={handoff?.disabledReason ?? null}
+          onOpenOnCohort={(appId) => actions.openOnCohort(run, appId)}
+          handoffDisabledReason={scopeHandoffReason}
         />
       )}
       {status === 'Failed' && <FailedCard code={run.code} message={run.errorMessage} />}

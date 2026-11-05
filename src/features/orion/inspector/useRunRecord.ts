@@ -5,14 +5,18 @@ import type { RunRecord } from '../agui/types';
 export type RecordState =
   | { state: 'loading' }
   | { state: 'ready'; record: RunRecord }
-  /** No record route (a fixture replay), or RUN_NOT_FOUND: the record is not stored (yet). */
-  | { state: 'unavailable'; reason: 'no-route' | 'not-stored' }
+  /**
+   * No record route (a fixture replay); RUN_NOT_FOUND, the record is not stored (yet); or
+   * UNAUTHENTICATED, the session ended, so the run cannot be read.
+   */
+  | { state: 'unavailable'; reason: 'no-route' | 'not-stored' | 'signed-out' }
   | { state: 'error'; message: string };
 
 /**
  * The run record from the record route, read again when the run's revision rises (the record is
- * rewritten after every transition). RUN_NOT_FOUND says the record is not available, per the
- * contract's client handling.
+ * rewritten after every transition). RUN_NOT_FOUND says the record is not available, and
+ * UNAUTHENTICATED that it cannot be read until the researcher signs in again, per the contract's
+ * client handling.
  */
 export const useRunRecord = (
   routes: RunRoutes | null,
@@ -38,6 +42,8 @@ export const useRunRecord = (
         if (controller.signal.aborted) return;
         if (err instanceof TransportError && err.bffCode === 'RUN_NOT_FOUND') {
           setResult({ state: 'unavailable', reason: 'not-stored' });
+        } else if (err instanceof TransportError && err.bffCode === 'UNAUTHENTICATED') {
+          setResult({ state: 'unavailable', reason: 'signed-out' });
         } else {
           setResult({ state: 'error', message: err instanceof Error ? err.message : 'The record could not be read' });
         }

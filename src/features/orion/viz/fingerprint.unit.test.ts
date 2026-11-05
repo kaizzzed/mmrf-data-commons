@@ -1,4 +1,4 @@
-import { createHash, webcrypto } from 'crypto';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import type { JsonValue, StateSnapshotEvent } from '../agui/types';
@@ -14,7 +14,6 @@ import {
   rankingFromTopMutatedGenes,
 } from './fingerprint';
 
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 
 /** orion/contracts/fixtures/fingerprint-vectors.json, copied byte for byte. */
 interface FingerprintVector {
@@ -69,7 +68,7 @@ describe('fingerprint vectors (orion/contracts/fixtures/fingerprint-vectors.json
       expect(document).toEqual(vector.document);
       expect(canonicalJson(document as unknown as JsonValue)).toBe(vector.canonical);
       expect(createHash('sha256').update(vector.canonical, 'utf8').digest('hex')).toBe(vector.sha256);
-      expect(await fingerprintSha256(document, subtle)).toBe(vector.sha256);
+      expect(await fingerprintSha256(document)).toBe(vector.sha256);
     },
   );
 
@@ -125,7 +124,7 @@ describe('computeLocalFingerprint', () => {
   it("reads the four sources in s1's order, POSTs the golden ranking query, and hashes the document", async () => {
     const [vector] = VECTORS;
     const { fetchFn, calls } = stackFetch(vector);
-    const result = await computeLocalFingerprint(ENDPOINTS, fetchFn, subtle);
+    const result = await computeLocalFingerprint(ENDPOINTS, fetchFn);
     expect(result.sha256).toBe(vector.sha256);
     expect(result.document).toEqual(vector.document);
     expect(calls.map((c) => c.url)).toEqual([
@@ -148,6 +147,6 @@ describe('computeLocalFingerprint', () => {
 
   it('rejects when a source answers an error', async () => {
     const fetchFn = jest.fn(() => Promise.resolve(jsonResponse({ error: 'down' }, 503))) as unknown as typeof fetch;
-    await expect(computeLocalFingerprint(ENDPOINTS, fetchFn, subtle)).rejects.toThrow('answered 503');
+    await expect(computeLocalFingerprint(ENDPOINTS, fetchFn)).rejects.toThrow('answered 503');
   });
 });

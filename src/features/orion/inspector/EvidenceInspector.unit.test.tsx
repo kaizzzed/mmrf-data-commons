@@ -96,6 +96,18 @@ describe('<EvidenceInspector />', () => {
     expect(within(inspector()).getByText(/CGS risk category = High risk/)).toBeInTheDocument();
   });
 
+  it('says the record cannot be read when the session has ended (UNAUTHENTICATED)', async () => {
+    renderInspector(
+      { runId: RUN.runId, stepId: 's2', factId: null },
+      routesWith(async () => {
+        throw new TransportError('BFF_ERROR', 'Sign in to use ORION.', 401, 'UNAUTHENTICATED');
+      }),
+    );
+    expect(
+      await within(inspector()).findByText('The run record cannot be read: your session has ended. Sign in again to see it.'),
+    ).toBeInTheDocument();
+  });
+
   it('says there is no record in a fixture replay, and offers no export', () => {
     renderInspector({ runId: RUN.runId, stepId: 's2', factId: null }, null);
     expect(within(inspector()).getByText('The run record is not available in a fixture replay.')).toBeInTheDocument();

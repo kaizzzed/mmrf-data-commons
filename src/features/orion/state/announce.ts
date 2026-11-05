@@ -1,7 +1,6 @@
 import { isEndStatus, type RunState } from '../agui/reducer';
+import { plural } from '../format';
 import { RUN_STATUS_VOCAB, STEP_STATUS_VOCAB } from '../status';
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** What a waiting run asks, so the card is announced even when focus stays in the composer (E21). */
 const waitingText = (run: RunState): string | null => {

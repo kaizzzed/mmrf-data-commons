@@ -137,6 +137,58 @@ describe('createRunController: viz reports', () => {
     expect(turns[1].forwardedProps.orion.vizReports).toEqual([report('v1')]);
   });
 
+  it('starts the 2 s timer again when the open invocation ends with reports still queued', async () => {
+    let finish: () => void = () => undefined;
+    const ended = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const turns: RunAgentInput[] = [];
+    const transport: RunTransport = {
+      async *run(input): AsyncGenerator<ParseResult> {
+        turns.push(input);
+        yield { kind: 'event', event: { type: 'RUN_STARTED', threadId: input.threadId, runId: input.runId } };
+        if (input.forwardedProps.orion.action === 'ask') await ended;
+        const status = input.forwardedProps.orion.action === 'ask' ? 'Complete' : 'Recorded';
+        yield { kind: 'event', event: { type: 'RUN_FINISHED', threadId: input.threadId, runId: input.runId, result: { status, code: null } } };
+      },
+    };
+    const controller = createRunController(transport, jest.fn());
+    controller.ask(THREAD, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(0);
+    controller.reportViz(THREAD, report('v1'));
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS + 10);
+    // The ask was open when the 2 s passed: the report waits.
+    expect(actionsOf(turns)).toEqual(['ask']);
+    finish();
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS - 1);
+    expect(actionsOf(turns)).toEqual(['ask']);
+    await jest.advanceTimersByTimeAsync(1);
+    // No turn came, so it went on its own instead of waiting for one.
+    expect(turns.map((t) => [t.runId, t.forwardedProps.orion])).toEqual([
+      [turns[0].runId, turns[0].forwardedProps.orion],
+      [RUN, { action: 'viz_report', vizId: 'v1', mounted: true, error: null, pinnedHashVerified: true }],
+    ]);
+  });
+
+  it('keeps a standalone report that failed for the next turn, without retrying it every 2 s', async () => {
+    let fail = true;
+    const { controller, turns } = setup((input) => {
+      if (input.forwardedProps.orion.action === 'viz_report' && fail) {
+        fail = false;
+        return new TransportError('NETWORK', 'offline');
+      }
+      return ok(input);
+    });
+    controller.reportViz(THREAD, report('v1'));
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS);
+    expect(actionsOf(turns)).toEqual(['viz_report']);
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS * 5);
+    expect(actionsOf(turns)).toEqual(['viz_report']);
+    controller.ask(THREAD, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(turns[1].forwardedProps.orion.vizReports).toEqual([report('v1')]);
+  });
+
   it('queues the reports of a rejected turn again for the next one', async () => {
     let first = true;
     const { controller, turns } = setup((input) => {
@@ -219,6 +271,39 @@ describe('createRunController: BFF errors', () => {
     await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
     expect(threadActions().at(-1)).toEqual({ type: 'view', view: done });
     expect(turns).toHaveLength(1);
+  });
+
+  it('SESSION_BUSY on a cancel: resends it after each poll that shows the run unfinished, without waiting for the lease', async () => {
+    let calls = 0;
+    const executing = { ...J1_EXECUTING, threadId: THREAD, runId: RUN };
+    const cancelled = { ...J1_DONE, threadId: THREAD, runId: RUN, status: 'Cancelled' as const };
+    const { controller, turns, routes, types } = setup(
+      (input) => (++calls <= 2 ? bff('SESSION_BUSY', 409) : [...ok(input).slice(0, 1), { type: 'STATE_SNAPSHOT', snapshot: cancelled }, ok(input)[1]]),
+      [executing],
+    );
+    controller.stop(THREAD, RUN);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(actionsOf(turns)).toEqual(['cancel']);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_MS);
+    // One poll showed the run Executing (a leased status): the cancel goes again at once.
+    expect(routes.view).toHaveBeenCalledTimes(1);
+    expect(actionsOf(turns)).toEqual(['cancel', 'cancel']);
+    expect(turns[1]).toEqual(turns[0]);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_MS);
+    expect(routes.view).toHaveBeenCalledTimes(2);
+    expect(actionsOf(turns)).toEqual(['cancel', 'cancel', 'cancel']);
+    expect(types().slice(-2)).toEqual(['STATE_SNAPSHOT', 'RUN_FINISHED']);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_LIMIT_MS);
+    expect(turns).toHaveLength(3);
+  });
+
+  it('SESSION_BUSY on a cancel of a run that has ended meanwhile: shows it and sends nothing more', async () => {
+    const cancelled = { ...J1_DONE, threadId: THREAD, runId: RUN, status: 'Cancelled' as const };
+    const { controller, turns, threadActions } = setup(() => bff('SESSION_BUSY', 409), [cancelled]);
+    controller.stop(THREAD, RUN);
+    await jest.advanceTimersByTimeAsync(BUSY_POLL_MS * 3);
+    expect(actionsOf(turns)).toEqual(['cancel']);
+    expect(threadActions().slice(-2)).toEqual([{ type: 'view', view: cancelled }, { type: 'turnSettled', runId: RUN }]);
   });
 
   it('gives up after 30 s of SESSION_BUSY with a notice', async () => {

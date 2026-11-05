@@ -2,10 +2,9 @@ import React, { type ReactElement } from 'react';
 import { MantineProvider } from '@mantine/core';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { webcrypto } from 'crypto';
 import type { PinnedViz } from '../agui/types';
 import { createLiveVizRegistry, LiveVizContext, type LiveVizRegistry } from './liveViz';
-import { OrionPpCard, type ViewerOutcome } from './OrionPpCard';
+import { errorText, OrionPpCard, type ViewerOutcome } from './OrionPpCard';
 
 interface BindCall {
   rootElem: HTMLElement;
@@ -49,12 +48,6 @@ const card = (vizId: string, pinned: PinnedViz = survival) => (
 
 const menuCount = () => document.querySelectorAll('body > .sja_menu_div').length;
 const phaseOf = (vizId: string) => screen.getByTestId(`orion-viz-${vizId}`).getAttribute('data-phase');
-
-beforeAll(() => {
-  if (!globalThis.crypto.subtle) {
-    Object.defineProperty(globalThis.crypto, 'subtle', { value: webcrypto.subtle });
-  }
-});
 
 beforeEach(() => {
   mockBind.mockClear();
@@ -139,6 +132,35 @@ describe('<OrionPpCard />', () => {
     await waitFor(() => expect(phaseOf('a')).toBe('error'));
     expect(screen.getByRole('alert')).toHaveTextContent(message);
     expect(outcomes).toEqual([{ kind: 'failed', ms: expect.any(Number), message }]);
+  });
+
+  it('mounts when the holder has only the hidden, empty error bar the mass apps create at start', async () => {
+    // Seen live with Correlation Plot 2.216.0: <div class="sja_errorbar" style="display: none;"></div>.
+    mockNext.push((arg) => {
+      arg.rootElem.innerHTML = '<div class="sja_errorbar" style="display: none;"></div><svg></svg>';
+      return Promise.resolve({ triggerAbort: jest.fn(), destroy: jest.fn() });
+    });
+    const outcomes: ViewerOutcome[] = [];
+    renderCards(
+      createLiveVizRegistry(),
+      <OrionPpCard vizId="a" title="A" pinned={survival} host="/protein-paint" onOutcome={(o) => outcomes.push(o)} />,
+    );
+    await waitFor(() => expect(phaseOf('a')).toBe('mounted'));
+    expect(outcomes).toEqual([{ kind: 'mounted', ms: expect.any(Number) }]);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('reads the shown error bar, skipping hidden ones and bars inside a hidden block', () => {
+    const root = document.createElement('div');
+    root.innerHTML =
+      '<div class="sja_errorbar" style="display: none;"></div>' +
+      '<div style="display: none"><div class="sja_errorbar"><div>x</div><div>stale</div></div></div>' +
+      '<div class="sja_errorbar"><div>x</div><div>Error: termdb/DE 500</div></div>';
+    expect(errorText(root)).toBe('Error: termdb/DE 500');
+    root.lastElementChild?.remove();
+    expect(errorText(root)).toBeNull();
+    root.innerHTML = '<div class="sja_errorbar"></div>';
+    expect(errorText(root)).toBe('The viewer reported an error.');
   });
 
   it('reports one mounted outcome per live session', async () => {

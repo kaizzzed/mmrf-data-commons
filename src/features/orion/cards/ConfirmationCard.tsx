@@ -3,6 +3,7 @@ import { Button, Checkbox, TextInput } from '@mantine/core';
 import type { ConfirmPending, Fact, PendingCohort } from '../agui/types';
 import { RunStatusLabel } from '../components/StatusLabel';
 import type { SaveProgress } from '../cohort/saveLedger';
+import { plural } from '../format';
 import { Card } from './Card';
 import { factMap, FactNumber, type FactLookup } from './FactChip';
 import { useAppearFocus } from './useAppearFocus';
@@ -25,8 +26,6 @@ export interface ConfirmationCardProps {
   onRename: (ref: string, name: string) => void;
   onCite?: (factId: string) => void;
 }
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 const MAX_NAME = 100;
 

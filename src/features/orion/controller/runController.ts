@@ -221,13 +221,33 @@ export const createRunController = (
     }
   };
 
-  /** 2 s after the last report: standalone if no invocation is open, else they ride on the next turn. */
+  /**
+   * 2 s after the last report: standalone if no invocation is open, else they ride on the next
+   * turn, and the timer starts again when the open invocation ends (`rearmReports`).
+   */
   const flushReports = (threadId: string): void => {
     vizTimers.delete(threadId);
     if (disposed || (inflight.get(threadId)?.size ?? 0) > 0) return;
     const reports = vizQueue.get(threadId) ?? [];
     vizQueue.set(threadId, []);
     for (const report of reports) enqueue(threadId, () => sendStandaloneReport(threadId, report));
+  };
+
+  const armReports = (threadId: string): void => {
+    const timer = vizTimers.get(threadId);
+    if (timer !== undefined) clearTimeout(timer);
+    vizTimers.set(threadId, setTimeout(() => flushReports(threadId), VIZ_REPORT_IDLE_MS));
+  };
+
+  /**
+   * A turn ended with reports still queued (they waited for it, or it was turned away): the 2 s
+   * timer starts again, so a report never waits for a turn that may not come (contract "When the
+   * browser sends a report"). A standalone report that failed is not retried this way: it rides on
+   * the thread's next turn.
+   */
+  const rearmReports = (threadId: string): void => {
+    if (disposed || vizTimers.has(threadId) || (vizQueue.get(threadId)?.length ?? 0) === 0) return;
+    armReports(threadId);
   };
 
   // ------------------------------------------------------------ the view route
@@ -303,7 +323,11 @@ export const createRunController = (
     if (isLeasedStatus(view.status)) follow(threadId, runId);
   };
 
-  /** SESSION_BUSY: wait for the run to leave a leased status, then resend only if the action still applies. */
+  /**
+   * SESSION_BUSY: wait for the run to leave a leased status, then resend only if the action still
+   * applies. A cancel does not wait for the run it stops: each poll that shows the run unfinished
+   * resends it (every 2 s within the same 30 s), and it settles once the run has ended.
+   */
   const pollView = async (ctx: TurnContext, controller: AbortController, message: string): Promise<void> => {
     const { threadId, runId } = ctx;
     if (!routes) {
@@ -342,6 +366,11 @@ export const createRunController = (
         // It started after all: follow the run instead of sending it twice.
         toThread(threadId, { type: 'turnSettled', runId });
         if (isLeasedStatus(view.status)) follow(threadId, runId);
+        return;
+      }
+      if (ctx.kind === 'cancel') {
+        if (isEndStatus(view.status)) toThread(threadId, { type: 'turnSettled', runId });
+        else await pump({ ...ctx, busyDeadline: deadline }, controller);
         return;
       }
       if (isLeasedStatus(view.status)) continue;
@@ -443,6 +472,7 @@ export const createRunController = (
       };
       return pump(ctx, controller).finally(() => {
         if (streams.get(threadId) === controller) streams.delete(threadId);
+        rearmReports(threadId);
       });
     });
   };
@@ -454,9 +484,11 @@ export const createRunController = (
       warmed.add(threadId);
       const input = buildInput(threadId, newId(), { action: 'warmup' });
       enqueue(threadId, () =>
-        drain(transport.run(input, new AbortController().signal)).catch(
-          () => undefined, // A failed warm-up only makes the first answer slower.
-        ),
+        drain(transport.run(input, new AbortController().signal))
+          .catch(
+            () => undefined, // A failed warm-up only makes the first answer slower.
+          )
+          .finally(() => rearmReports(threadId)),
       );
     },
     ask(threadId, question, cohortContext, options = {}) {
@@ -508,9 +540,7 @@ export const createRunController = (
         (r) => !(r.runId === report.runId && r.vizId === report.vizId),
       );
       vizQueue.set(threadId, [...queue, report]);
-      const timer = vizTimers.get(threadId);
-      if (timer !== undefined) clearTimeout(timer);
-      vizTimers.set(threadId, setTimeout(() => flushReports(threadId), VIZ_REPORT_IDLE_MS));
+      armReports(threadId);
     },
     restore(threadId, runIds, latest) {
       if (!routes || runIds.length === 0) return;

@@ -34,9 +34,9 @@ export interface RunActions {
   edit: (run: RunState, edit: PlanEdit) => void;
   retry: (run: RunState, stepId: string) => void;
   inspect: (target: InspectorTarget) => void;
-  /** Hand-off on the cohorts `cohortRefs` name (a limitation card: the run's scope). */
-  openOnCohort: (run: RunState, appId: AppId, cohortRefs: readonly string[]) => void;
-  /** A viz card's hand-off: the card names its cohort. */
+  /** A limitation card's hand-off: the nearest app, on the run's scope. */
+  openOnCohort: (run: RunState, appId: AppId) => void;
+  /** A viz card's hand-off: the card names its cohort (handoff.ts handoffFor). */
   openInTool: (run: RunState, spec: VizSpec, appId: AppId, cohortId: string | null) => void;
   openLink: (link: OpenLink) => void;
   reportViz: (report: VizReport) => void;

@@ -1,15 +1,16 @@
 import type { ServerResponse } from 'node:http';
-import { BFF_ERROR_STATUS, type BffRouteError, type BffRouteErrorCode } from './routes';
+import type { BffError, BffErrorCode } from '../agui/types';
+import { BFF_ERROR_STATUS } from './routes';
 
 /**
  * An error a route answers with a BffError JSON body (contract "BFF routes", Errors), never an
  * event stream. `status` defaults to the contract's status for the code.
  */
 export class BffFailure extends Error {
-  readonly code: BffRouteErrorCode;
+  readonly code: BffErrorCode;
   readonly status: number;
 
-  constructor(code: BffRouteErrorCode, message: string, status: number = BFF_ERROR_STATUS[code]) {
+  constructor(code: BffErrorCode, message: string, status: number = BFF_ERROR_STATUS[code]) {
     super(message);
     this.name = 'BffFailure';
     this.code = code;
@@ -30,7 +31,7 @@ export const sendBffError = (
     if (!res.writableEnded) res.end();
     return;
   }
-  const body: BffRouteError = { error: { code: failure.code, message: failure.message } };
+  const body: BffError = { error: { code: failure.code, message: failure.message } };
   const text = JSON.stringify(body);
   res.writeHead(failure.status, {
     'Content-Type': JSON_CONTENT_TYPE,

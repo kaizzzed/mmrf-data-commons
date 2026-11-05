@@ -5,16 +5,12 @@
 import { createContext } from 'react';
 import { GEN3_API } from '@gen3/core';
 import { GEN3_ANALYSIS_API, PROTEINPAINT_API } from '@/core/constants';
-import { type CallRecord, type JsonValue, ORION_ROUTES, type RunRecord } from '../agui/types';
+import { httpRoutes, TransportError, type RunRoutes } from '../agui/transport';
+import type { CallRecord, JsonValue, RunRecord } from '../agui/types';
+import { callsOf, type CallOrigin } from '../calls';
 import { computeLocalFingerprint, type FingerprintEndpoints } from './fingerprint';
 import { MOUNT_TIMEOUT_MS } from './OrionPpCard';
 import { untappedFetch } from './viewerRequests';
-
-/** The step whose calls produced a cited step's result: itself, or the step a Reused one reuses. */
-export interface CallOrigin {
-  planVersion: number;
-  stepId: string;
-}
 
 /** A cited step's recorded call: the last attempt that succeeded. */
 export interface CitedCall {
@@ -62,32 +58,34 @@ export const pageLocalFingerprint = (): Promise<string> => {
 
 /** The last call of the origin step that returned ok (a retry or retry_step adds later attempts). */
 export const citedCallOf = (calls: readonly CallRecord[], origin: CallOrigin): CitedCall | null => {
-  const ok = calls.filter((c) => c.planVersion === origin.planVersion && c.stepId === origin.stepId && c.status === 'ok');
+  const ok = callsOf(calls, origin).filter((c) => c.status === 'ok');
   const last = ok[ok.length - 1];
   return last ? { callId: last.callId, request: last.request, observed: last.observed } : null;
 };
 
-/** GET the record route (same origin, `?threadId=`); 404 means the record is not stored (yet). */
-export const fetchCitedCall = async (
-  threadId: string,
-  runId: string,
-  origin: CallOrigin,
-  fetchFn: typeof fetch = (input, init) => globalThis.fetch(input, init),
-): Promise<CitedCall | null> => {
-  const response = await fetchFn(`${ORION_ROUTES.record(runId)}?threadId=${encodeURIComponent(threadId)}`, {
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
-  });
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`The run record answered ${response.status}`);
-  const record = (await response.json()) as Pick<RunRecord, 'calls'>;
-  return Array.isArray(record.calls) ? citedCallOf(record.calls, origin) : null;
-};
+/**
+ * loadCitedCall over the record route (`?threadId=`, the app's base path, BffError parsing): null
+ * when there is no route behind the transport (a replay) or the record is not stored yet
+ * (RUN_NOT_FOUND); any other failure rejects.
+ */
+export const citedCallLoader =
+  (routes: RunRoutes | null): VizServices['loadCitedCall'] =>
+  async (threadId, runId, origin) => {
+    if (!routes) return null;
+    let record: RunRecord;
+    try {
+      record = await routes.record(runId, threadId);
+    } catch (err) {
+      if (err instanceof TransportError && err.bffCode === 'RUN_NOT_FOUND') return null;
+      throw err;
+    }
+    return citedCallOf(record.calls, origin);
+  };
 
 export const DEFAULT_VIZ_SERVICES: VizServices = {
   host: PROTEINPAINT_API,
   localFingerprint: pageLocalFingerprint,
-  loadCitedCall: (threadId, runId, origin) => fetchCitedCall(threadId, runId, origin),
+  loadCitedCall: citedCallLoader(httpRoutes()),
   mountTimeoutMs: MOUNT_TIMEOUT_MS,
 };
 

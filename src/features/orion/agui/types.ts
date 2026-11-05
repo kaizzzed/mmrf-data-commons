@@ -719,8 +719,12 @@ export interface SavedCohortReadBack {
   ref: string;
   cohortId: string;
   name: string;
-  /** defSha256 the browser computed from the saved cohort's stored filters, as read back. */
-  defSha256: string;
+  /**
+   * defSha256 the browser computed from the saved cohort's stored filters, as read back; null
+   * when those filters cannot be read (contract "Reading a saved cohort's FilterSet"). Null never
+   * matches the pending hash, so the agent fails the write step with WRITE_VERIFY_FAILED.
+   */
+  defSha256: string | null;
   /** True when an identical saved cohort was reused instead of created. */
   reused: boolean;
 }
@@ -831,6 +835,7 @@ export const runtimeSessionId = (threadId: string): string => `orion-${threadId}
 
 export type BffErrorCode =
   | 'INVALID_INPUT'
+  | 'UNAUTHENTICATED'
   | 'RUN_NOT_FOUND'
   | 'SESSION_BUSY'
   | 'UPSTREAM_ERROR'
@@ -844,13 +849,16 @@ export interface BffError {
 
 /**
  * What the browser does with each BFF error (contract "Client handling of BFF errors"):
- * `reject` treats the turn as rejected; `pollView` polls the target run's view route until it
- * is not leased, then resends unchanged only if the run still waits for the action (an ask: only
- * if its view is 404); `checkView` reads the view of the turn's runId first (200: follow that run;
- * 404: rejected), never resending an ask under a new runId; `notStored` drops the run on restore.
+ * `reject` treats the turn as rejected (UNAUTHENTICATED: with a notice to sign in again);
+ * `pollView` polls the target run's view route until it is not leased, then resends unchanged
+ * only if the run still waits for the action (an ask: only if its view is 404; a cancel: after
+ * one poll that shows the run still unfinished); `checkView` reads the view of the turn's runId
+ * first (200: follow that run; 404: rejected), never resending an ask under a new runId;
+ * `notStored` drops the run on restore.
  */
 export const BFF_ERROR_HANDLING = {
   INVALID_INPUT: 'reject',
+  UNAUTHENTICATED: 'reject',
   SESSION_BUSY: 'pollView',
   UPSTREAM_ERROR: 'checkView',
   UPSTREAM_TIMEOUT: 'checkView',
@@ -980,19 +988,54 @@ export interface CompiledStep {
   dependsOn: string[];
 }
 
+/** A StepRef: a slot that reads an earlier step's last successful call (TOOLS.md 1). */
+export interface StepRefRecord {
+  ref: string;
+  pointer: string;
+  intersect?: string;
+}
+
+/** A compiled scope: the view's scope plus its clauses; cohortId and ledgerRef are omitted when null. */
+export type CompiledScope = PlanScope & { clauses: IrClause[]; cohortId?: string; ledgerRef?: string };
+
+/** A run cohort as the compiler plans it (the record's planVersions[].cohorts). */
+export interface PlanCohortRecord {
+  ref: string;
+  role: CohortRole;
+  source: CohortSource;
+  name: string;
+  definitionText: string;
+  /** Known at compile time for the scope, a filter cohort and mutation-tested cases; null for a case-ID cohort. */
+  definition: CanonicalDefinition | null;
+  /** Where a case-ID cohort's ids come from. */
+  ids: StepRefRecord | null;
+  /** The step that sizes the cohort, and its count fact. */
+  stepId: string | null;
+  countFactId: string | null;
+  save: CohortSave;
+  cohortId: string | null;
+  savedName: string | null;
+}
+
 export interface CompiledPlan {
   version: number;
   signature: string;
-  scope: PlanScope & { clauses: IrClause[] };
+  scope: CompiledScope;
   rows: PlanRow[];
   steps: CompiledStep[];
   assumptions: Assumption[];
   limitations: Limitation[];
   writes: boolean;
   paraphrase: string;
-  altScope: (PlanScope & { clauses: IrClause[] }) | null;
+  altScope: CompiledScope | null;
   altScopeChoice: ScopeChoice | null;
   editable: Editable[];
+  // Compiler additions, each omitted when empty, so a paused or reloaded run rebuilds its cohorts,
+  // pending payload and consent from the record alone.
+  cohorts?: PlanCohortRecord[];
+  consent?: ConsentPending;
+  openApps?: NearestApp[];
+  ledger?: LedgerUse;
 }
 
 /** A voided nonce (an edit or a cancel replaced the pause) has decision null. */
@@ -1034,6 +1077,8 @@ export interface Lease {
 export interface Environment {
   mode: 'L' | 'A' | 'H';
   planner: string;
+  /** `stub` or `bedrock`; null only in a record written before v1.2 named it. */
+  composer: string | null;
   executor: string;
   agentVersion: string;
   toolTransport: Transport | null;

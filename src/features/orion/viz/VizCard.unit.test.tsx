@@ -2,7 +2,6 @@ import React, { type ReactElement } from 'react';
 import { MantineProvider } from '@mantine/core';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { webcrypto } from 'crypto';
 import type { RunView, VizReport, VizSpec } from '../agui/types';
 import { createLiveVizRegistry, LiveVizContext, type LiveVizRegistry } from './liveViz';
 import { pinnedHash } from './ppPinnedArgs';
@@ -53,7 +52,6 @@ jest.mock('@sjcrh/proteinpaint-client', () => ({
   bindProteinPaint: (arg: BindCall) => mockBind(arg),
 }));
 
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 const FINGERPRINT = '0f27e0bdbb28a9357689a6137a8db7a9419dc59e5ec6a2a0e09b826bade7d71d';
 
 const services = (patch: Partial<VizServices> = {}): VizServices => ({
@@ -119,10 +117,6 @@ const report = (view: RunView, patch: Partial<VizReport> = {}): VizReport => ({
 
 /** Distinct run ids, so several fixture runs can share one page. */
 const asRun = (view: RunView, runId: string): RunView => ({ ...view, runId });
-
-beforeAll(() => {
-  if (!globalThis.crypto.subtle) Object.defineProperty(globalThis.crypto, 'subtle', { value: webcrypto.subtle });
-});
 
 beforeEach(() => {
   mockBind.mockClear();
@@ -202,7 +196,7 @@ describe('<VizCard /> mounts every launcher through OrionPpCard', () => {
     expect(spec.pinned).toBeNull();
     const pinned = deInputPinned(lastView('j3-after-confirm'));
     // The rebuilt inputs are exactly the agent's: the snapshot's own pinnedHash.
-    expect(await pinnedHash(pinned, subtle)).toBe(spec.pinnedHash);
+    expect(await pinnedHash(pinned)).toBe(spec.pinnedHash);
     let resolve: (s: VizSpec) => void = () => undefined;
     const loadUntrimmedSpec = jest.fn(() => new Promise<VizSpec>((r) => (resolve = r)));
     const onReport = jest.fn();
@@ -316,6 +310,18 @@ describe('<VizCard /> live cards', () => {
     expect(onReport.mock.calls.filter(([r]: [VizReport]) => r.runId === j1.runId)).toHaveLength(1);
   });
 
+  it("a frozen table's chips open their fact in the Evidence Inspector, like every chip in the thread", async () => {
+    const view = lastView('j1-complete');
+    const onCite = jest.fn();
+    mockBehaviours.push(rejects('termdb/survival 503'));
+    renderCards([{ ...props({ view }), onCite }]);
+    await waitFor(() => expect(card()).toHaveAttribute('data-stage', 'static'));
+    await userEvent.click(within(card()).getAllByRole('button', { name: 'Row 1 · s2 cohort_count' })[0]);
+    expect(onCite).toHaveBeenCalledWith('f.s2.count');
+    await userEvent.click(within(within(card()).getByTestId('orion-viz-frozen-note')).getByRole('button', { name: 'Row 2 · s4 survival_compare' }));
+    expect(onCite).toHaveBeenLastCalledWith('f.s4.p');
+  });
+
   it('a card of another run with the same viz id holds its own slot', async () => {
     const one = asRun(lastView('j1-complete'), 'd'.repeat(32));
     const two = asRun(lastView('j1-complete'), 'e'.repeat(32));
@@ -351,7 +357,7 @@ describe('<VizCard /> fallbacks in the cut order (cut 2)', () => {
     );
     expect(within(card()).getByText(DE_INPUT_CAPTION)).toBeInTheDocument();
     // The fallback's inputs are the agent's own deInput spec for the same run (j3-deinput).
-    expect(await pinnedHash(deInputPinned(view), subtle)).toBe(onlySpec(lastView('j3-deinput')).pinnedHash);
+    expect(await pinnedHash(deInputPinned(view))).toBe(onlySpec(lastView('j3-deinput')).pinnedHash);
     await waitFor(() =>
       expect(onReport.mock.calls.map(([r]: [VizReport]) => r)).toEqual([
         report(view, { mounted: false, error: 'differentialAnalysis is not a chart type' }),

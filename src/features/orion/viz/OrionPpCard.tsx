@@ -3,6 +3,7 @@ import React, {
   useContext,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -84,11 +85,27 @@ export interface OrionPpCardProps {
   mountTimeoutMs?: number;
 }
 
-const errorText = (root: HTMLElement): string | null => {
-  const bar = root.querySelector(ERROR_SELECTOR);
-  // The bar's first child is its close cross; the message follows.
-  const text = bar?.lastElementChild?.textContent ?? bar?.textContent ?? null;
-  return text === null ? null : text.trim() || 'The viewer reported an error.';
+/** Hidden by its own or an ancestor's inline style (up to the holder), as ProteinPaint hides it. */
+const isHidden = (element: HTMLElement, root: HTMLElement): boolean => {
+  for (let node: HTMLElement | null = element; node && node !== root; node = node.parentElement) {
+    if (node.hidden || node.style.display === 'none') return true;
+  }
+  return false;
+};
+
+/**
+ * The message of the first error bar ProteinPaint shows in the holder. The mass apps (Correlation
+ * Plot, DE, OncoMatrix) create an empty bar hidden with display:none at start, ready for a later
+ * error; that bar is not an error until it is shown.
+ */
+export const errorText = (root: HTMLElement): string | null => {
+  for (const bar of root.querySelectorAll<HTMLElement>(ERROR_SELECTOR)) {
+    if (isHidden(bar, root)) continue;
+    // The bar's first child is its close cross; the message follows.
+    const text = bar.lastElementChild?.textContent ?? bar.textContent ?? '';
+    return text.trim() || 'The viewer reported an error.';
+  }
+  return null;
 };
 
 /**
@@ -129,7 +146,6 @@ export const OrionPpCard = ({
   const registry = useContext(LiveVizContext);
   const inRegistry = useSyncExternalStore(registry.subscribe, registry.snapshot, registry.snapshot).includes(liveKey);
   const [frozenInputs, setFrozenInputs] = useState(() => (pinned ? { pinned, host } : null));
-  const [hash, setHash] = useState<string | null>(null);
   const [session, setSession] = useState<Session>({ phase: 'queued' });
   const viewerRef = useRef<HTMLDivElement>(null);
   const callbacks = useRef({ onOutcome, onRequest });
@@ -148,16 +164,14 @@ export const OrionPpCard = ({
     return () => registry.release(liveKey);
   }, [registry, liveKey, blocked]);
 
-  useEffect(() => {
-    if (!frozenInputs) return undefined;
-    let current = true;
-    pinnedHash(frozenInputs.pinned).then(
-      (value) => current && setHash(value),
-      () => current && setHash(null),
-    );
-    return () => {
-      current = false;
-    };
+  const hash = useMemo(() => {
+    if (!frozenInputs) return null;
+    try {
+      return pinnedHash(frozenInputs.pinned);
+    } catch {
+      // A number outside the portable range: the header shows no hash.
+      return null;
+    }
   }, [frozenInputs]);
 
   useEffect(() => {

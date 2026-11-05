@@ -13,7 +13,7 @@ import { LuDatabase, LuShieldAlert, LuShieldCheck, LuShieldQuestion } from 'reac
 import type { AppId, PinnedViz, RunView, VizReport, VizSpec } from '../agui/types';
 import { formatDuration } from '../format';
 import { FrozenTableView } from './FrozenTableView';
-import { appTitle, deInputFallback, handoffFor } from './handoff';
+import { appTitle, deInputFallback, handoffFor } from '../handoff/handoff';
 import { OrionPpCard, type ViewerOutcome } from './OrionPpCard';
 import {
   CHECKING,
@@ -27,7 +27,8 @@ import {
 } from './parity';
 import { deriveRequestPinned } from './requestPinned';
 import type { ViewerRequest } from './viewerRequests';
-import { type CallOrigin, type CitedCall, VizServicesContext } from './vizServices';
+import { callOrigin } from '../calls';
+import { type CitedCall, VizServicesContext } from './vizServices';
 
 /** viz.de.caption: the p-value table sorts by fold change and pinned state cannot change it (Open question 9). */
 export const DE_SORT_CAPTION = 'Table sorted by fold change. Sort by adjusted p-value to match the answer.';
@@ -57,6 +58,8 @@ export interface VizCardProps {
   onReport: (report: VizReport) => void;
   onOpenInTool: (appId: AppId, cohortId: string | null) => void;
   loadUntrimmedSpec: (runId: string, vizId: string) => Promise<VizSpec | null>;
+  /** Opens a frozen table chip's fact in the Evidence Inspector. */
+  onCite?: (factId: string) => void;
 }
 
 /** Which viewer the card mounts: its own launcher, the client's DEinput fallback, or none (cut 2). */
@@ -75,10 +78,6 @@ type FingerprintCheck =
   | { state: 'failed'; message: string };
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
-/** The step whose calls a cited step's result came from (itself, or the step it reuses). */
-const originOf = (run: Pick<RunView, 'steps' | 'plan'>, stepId: string): CallOrigin =>
-  run.steps.find((s) => s.id === stepId)?.reusedFrom ?? { planVersion: run.plan?.version ?? 1, stepId };
 
 const shortHash = (hash: string): string => `${hash.slice(0, 8)}…`;
 
@@ -223,7 +222,7 @@ const ViewerRequests = ({
  * on the saved cohorts, then to the cited table (cut 2); Don't save turns both hand-off and the
  * DEinput fallback off (C-16). Reports go to `onReport` when the viewer mounts or fails.
  */
-export function VizCard({ threadId, run, spec, onReport, onOpenInTool, loadUntrimmedSpec }: VizCardProps): JSX.Element {
+export function VizCard({ threadId, run, spec, onReport, onOpenInTool, loadUntrimmedSpec, onCite }: VizCardProps): JSX.Element {
   const services = useContext(VizServicesContext);
   const [frozenSpec] = useState(spec);
   const [inputs, setInputs] = useState<Inputs>(() =>
@@ -254,7 +253,7 @@ export function VizCard({ threadId, run, spec, onReport, onOpenInTool, loadUntri
   const loadCitedCall = useCallback((): Promise<CitedCall | null> => {
     if (!citedCall.current) {
       const { services: s, threadId: thread, run: r } = latest.current;
-      citedCall.current = s.loadCitedCall(thread, r.runId, originOf(r, frozenSpec.citesSteps[0]));
+      citedCall.current = s.loadCitedCall(thread, r.runId, callOrigin(r, frozenSpec.citesSteps[0]));
       citedCall.current.catch(() => {
         citedCall.current = null;
       });
@@ -301,11 +300,8 @@ export function VizCard({ threadId, run, spec, onReport, onOpenInTool, loadUntri
       setEvent({ mounted: false, error: `Pinned inputs unavailable: ${inputs.message}` });
       return undefined;
     }
-    let current = true;
-    void checkParity(inputs.pinned, frozenSpec).then((result) => current && setParity(result));
-    return () => {
-      current = false;
-    };
+    setParity(checkParity(inputs.pinned, frozenSpec));
+    return undefined;
   }, [inputs, frozenSpec]);
 
   // Mode H: the viewers read the local stack, so the card checks it holds the run's data.
@@ -440,7 +436,7 @@ export function VizCard({ threadId, run, spec, onReport, onOpenInTool, loadUntri
   };
 
   const frozenTable = (
-    <FrozenTableView frozen={frozenSpec.frozen} facts={run.facts} label={frozenSpec.title} />
+    <FrozenTableView frozen={frozenSpec.frozen} facts={run.facts} label={frozenSpec.title} onCite={onCite} />
   );
   const caption =
     stage.kind === 'deInput'

@@ -1,4 +1,4 @@
-import { createHash, webcrypto } from 'crypto';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { canonicalJson, pinnedFromVizSpec, pinnedHash } from '../viz/ppPinnedArgs';
@@ -35,7 +35,6 @@ import {
  */
 const DIR = path.join(__dirname, '__fixtures__');
 const VIZ_DIR = path.join(__dirname, '..', 'viz', '__fixtures__');
-const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle) as SubtleCrypto;
 
 const STREAMS = {
   'j1-stub': 'ObservedOnly',
@@ -43,6 +42,9 @@ const STREAMS = {
   'j1-partial': 'Partial',
   'j1-retry': 'Complete',
   'j1-stop': 'Cancelled',
+  'j2-save-pause': 'AwaitingConfirmation',
+  'j2-after-confirm': 'Complete',
+  'j2-dont-save': 'Complete',
   'j3-save-pause': 'AwaitingConfirmation',
   'j3-after-confirm': 'Complete',
   'j3-edit-at-pause': 'AwaitingConfirmation',
@@ -59,6 +61,7 @@ const NAMES = Object.keys(STREAMS) as StreamName[];
 
 /** Streams that continue a run another fixture left paused or ended. */
 const PREDECESSOR: Partial<Record<StreamName, StreamName>> = {
+  'j2-after-confirm': 'j2-save-pause',
   'j3-after-confirm': 'j3-save-pause',
   'j1-retry': 'j1-partial',
 };
@@ -143,7 +146,7 @@ describe('contract fixtures', () => {
     }
   });
 
-  it.each(['j3-save-pause', 'j3-edit-at-pause'] as const)(
+  it.each(['j2-save-pause', 'j3-save-pause', 'j3-edit-at-pause'] as const)(
     "%s collects the save_cohorts args, which equal the pause snapshot's pending payload",
     (name) => {
       const events = eventsOf(name);
@@ -182,7 +185,7 @@ describe('contract fixtures', () => {
         for (const spec of view.vizSpecs) {
           expect(spec.requestPinnedHash).toBe(spec.pinnedHash);
           if (spec.pinned === null) continue;
-          expect(await pinnedHash(pinnedFromVizSpec(spec), subtle)).toBe(spec.pinnedHash);
+          expect(await pinnedHash(pinnedFromVizSpec(spec))).toBe(spec.pinnedHash);
           checked += 1;
         }
       }
@@ -322,7 +325,7 @@ describe('viz vectors', () => {
     expect(new Set(vectors.map((v) => v.launcher))).toEqual(new Set(['survival', 'oncomatrix', 'deDirect', 'deInput']));
     for (const vector of vectors) {
       expect(vector.pinned.kind).toBe(vector.launcher);
-      expect(await pinnedHash(vector.pinned, subtle)).toBe(vector.requestPinnedHash);
+      expect(await pinnedHash(vector.pinned)).toBe(vector.requestPinnedHash);
     }
   });
 });

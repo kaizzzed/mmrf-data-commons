@@ -12,9 +12,8 @@ import type {
   SampleGroup,
   VolcanoPins,
 } from '../agui/types';
-import { pinnedHash } from './ppPinnedArgs';
+import { isJsonObject, pinnedHash, type JsonObject } from './ppPinnedArgs';
 
-type JsonObject = { [key: string]: JsonValue };
 
 /** The recorded request (or output) does not have the shape its launcher's derivation reads. */
 export class RequestPinnedError extends Error {
@@ -26,8 +25,6 @@ export class RequestPinnedError extends Error {
 
 const DE_METHODS: readonly DeMethod[] = ['wilcoxon', 'edgeR', 'limma'];
 
-const isObject = (value: JsonValue | undefined): value is JsonObject =>
-  value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value);
 
 const field = (object: JsonObject, key: string, where: string): JsonValue => {
   if (!(key in object)) throw new RequestPinnedError(`${where} has no ${key}`);
@@ -41,14 +38,14 @@ const text = (value: JsonValue, where: string): string => {
 
 const filterOrNull = (value: JsonValue, where: string): GqlFilter | null => {
   if (value === null) return null;
-  if (!isObject(value)) throw new RequestPinnedError(`${where} is not a Gen3 filter`);
+  if (!isJsonObject(value)) throw new RequestPinnedError(`${where} is not a Gen3 filter`);
   return value;
 };
 
 const objects = (value: JsonValue, where: string): JsonObject[] => {
   if (!Array.isArray(value)) throw new RequestPinnedError(`${where} is not a list`);
   // As the agent does, entries that are not objects are skipped, then the count is checked.
-  return value.filter(isObject);
+  return value.filter(isJsonObject);
 };
 
 const twoGroups = <T>(groups: T[]): [T, T] => {
@@ -111,7 +108,7 @@ export const minusLog10 = (cutoff: number): number => {
 
 const survival = (request: JsonObject): PinnedViz => {
   const split = field(request, 'split', "survival_compare's request");
-  if (!isObject(split)) throw new RequestPinnedError("survival_compare's request names no split");
+  if (!isJsonObject(split)) throw new RequestPinnedError("survival_compare's request names no split");
   return {
     kind: 'survival',
     filter0: filterOrNull(field(request, 'scope', "survival_compare's request"), 'scope'),
@@ -121,12 +118,12 @@ const survival = (request: JsonObject): PinnedViz => {
 };
 
 const oncomatrix = (request: JsonObject, observed: JsonValue | undefined): PinnedViz => {
-  const genes = isObject(observed) ? observed.genes : undefined;
+  const genes = isJsonObject(observed) ? observed.genes : undefined;
   if (!Array.isArray(genes)) throw new RequestPinnedError("top_mutated_genes' output lists no genes");
   return {
     kind: 'oncomatrix',
     filter0: filterOrNull(field(request, 'filter0', "top_mutated_genes' request"), 'filter0'),
-    genes: genes.filter(isObject).map((g, i) => text(field(g, 'gene', `genes[${i}]`), `genes[${i}].gene`)),
+    genes: genes.filter(isJsonObject).map((g, i) => text(field(g, 'gene', `genes[${i}]`), `genes[${i}].gene`)),
   };
 };
 
@@ -154,7 +151,7 @@ const deDirect = (request: JsonObject): PinnedViz => {
     method: method as DeMethod,
   };
   const thresholds = request.thresholds;
-  if (isObject(thresholds)) {
+  if (isJsonObject(thresholds)) {
     const cutoff = field(thresholds, 'pValueCutoff', 'thresholds');
     const foldChangeCutoff = field(thresholds, 'foldChangeCutoff', 'thresholds');
     const pValueType = field(thresholds, 'pValueType', 'thresholds');
@@ -172,7 +169,7 @@ const deDirect = (request: JsonObject): PinnedViz => {
 const deInput = (request: JsonObject): PinnedViz => {
   const groups = objects(field(request, 'groups', "de_run's request"), 'groups').map((g, i): CohortGroup => {
     const filter0 = field(g, 'filter0', `groups[${i}]`);
-    if (!isObject(filter0)) throw new RequestPinnedError(`groups[${i}].filter0 is not a Gen3 filter`);
+    if (!isJsonObject(filter0)) throw new RequestPinnedError(`groups[${i}].filter0 is not a Gen3 filter`);
     return {
       name: text(field(g, 'name', `groups[${i}]`), `groups[${i}].name`),
       cohortId: text(field(g, 'cohortId', `groups[${i}]`), `groups[${i}].cohortId`),
@@ -198,7 +195,7 @@ export const deriveRequestPinned = (
   request: JsonValue,
   observed?: JsonValue,
 ): PinnedViz => {
-  if (!isObject(request)) throw new RequestPinnedError('The recorded request is not an object');
+  if (!isJsonObject(request)) throw new RequestPinnedError('The recorded request is not an object');
   switch (launcher) {
     case 'survival':
       return survival(request);
@@ -212,9 +209,5 @@ export const deriveRequestPinned = (
 };
 
 /** pinnedHash of deriveRequestPinned: what the agent records as the spec's requestPinnedHash. */
-export const requestPinnedHash = (
-  launcher: PinnedKind,
-  request: JsonValue,
-  observed?: JsonValue,
-  subtle?: SubtleCrypto,
-): Promise<string> => pinnedHash(deriveRequestPinned(launcher, request, observed), subtle);
+export const requestPinnedHash = (launcher: PinnedKind, request: JsonValue, observed?: JsonValue): string =>
+  pinnedHash(deriveRequestPinned(launcher, request, observed));

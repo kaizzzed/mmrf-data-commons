@@ -56,6 +56,10 @@ const NearestAppLine = ({
 
 const NO_FACTS: readonly Fact[] = [];
 
+/** The app a limitation card offers: the first nearest app of its limitations (contract "Limitations and the nearest app"). */
+export const nearestAppOf = (limitations: readonly Limitation[]): NearestApp | undefined =>
+  limitations.flatMap((l) => l.nearestApps)[0];
+
 /** What is missing, why it blocks the answer, and what would unblock it (FR-17, C-06). */
 export const LimitationCard = ({
   variant = 'limited',
@@ -70,7 +74,7 @@ export const LimitationCard = ({
   const unsupported = variant === 'unsupported';
   const lookup = factMap(facts);
   // With no app listed, the card says nothing about which apps exist.
-  const nearestApp: NearestApp | undefined = limitations.flatMap((l) => l.nearestApps)[0];
+  const nearestApp = nearestAppOf(limitations);
   return (
     <Card
       titleId={titleId}

@@ -5,6 +5,9 @@ export const formatDuration = (ms: number): string =>
 
 export const formatCount = (n: number): string => n.toLocaleString('en-US');
 
+/** "1 cohort", "2 cohorts": a count the browser itself made (not a tool-returned number). */
+export const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
 /** "Scope: <cohort name> · <n> cases", or "· count pending" before a count is known (chip and plan card). */
 export const formatScope = (name: string, caseCount: number | null): string =>
   caseCount === null

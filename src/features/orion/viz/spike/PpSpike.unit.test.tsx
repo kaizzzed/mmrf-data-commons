@@ -2,7 +2,6 @@ import React from 'react';
 import { MantineProvider } from '@mantine/core';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { webcrypto } from 'crypto';
 import { createLiveVizRegistry, LiveVizContext } from '../liveViz';
 import PpSpike from './PpSpike';
 
@@ -21,10 +20,6 @@ const mockBind = jest.fn((arg: BindCall) => {
 jest.mock('@sjcrh/proteinpaint-client', () => ({
   bindProteinPaint: (arg: BindCall) => mockBind(arg),
 }));
-
-beforeAll(() => {
-  if (!globalThis.crypto.subtle) Object.defineProperty(globalThis.crypto, 'subtle', { value: webcrypto.subtle });
-});
 
 describe('<PpSpike />', () => {
   it('adds the spike cards one at a time, keeps two live, and removes them all', async () => {

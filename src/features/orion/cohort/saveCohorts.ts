@@ -8,7 +8,6 @@ import { storedCohortSha256, type CohortPort, type StoredCohort } from './cohort
 import type { LedgerCohort, LedgerStore, SaveLedger } from './saveLedger';
 import { setActiveCohort, type SetActiveOutcome } from './setActiveCohort';
 import type { WriteLog } from './writeLog';
-import { sha256Hex } from './sha256';
 
 export type ConfirmAction = Extract<OrionAction, { action: 'confirm' }>;
 
@@ -51,12 +50,12 @@ const hasDefinition = (
 ): cohort is SaveCohortsArgs['cohorts'][number] & { definition: CanonicalDefinition } => cohort.definition !== null;
 
 /**
- * The hash a saved cohort's stored filters read back as. Filters ORION cannot read (the store
- * changed them) still yield a hash, of their raw JSON, so the agent's read-back check fails the
- * write step with WRITE_VERIFY_FAILED instead of the run waiting on a confirm that never comes.
+ * The hash a saved cohort's stored filters read back as, or null when ORION cannot read them (the
+ * store changed them). Null never equals the pending hash, so the agent's read-back check fails the
+ * write step with WRITE_VERIFY_FAILED instead of the run waiting on a confirm that never comes
+ * (contract "save_cohorts tool call", step 3).
  */
-const readBackSha256 = (cohort: StoredCohort): string =>
-  storedCohortSha256(cohort) ?? sha256Hex(`unreadable:${JSON.stringify(cohort.filters)}`);
+const readBackSha256 = (cohort: StoredCohort): string | null => storedCohortSha256(cohort);
 
 /** Which cohort, if any, already holds a definition: the agent's match first, then the store's order. */
 const findReuse = (
