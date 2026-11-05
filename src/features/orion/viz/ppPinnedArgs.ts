@@ -251,11 +251,16 @@ export const pinnedDocument = (pinned: PinnedViz): JsonValue =>
 const toHex = (buffer: ArrayBuffer): string =>
   Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join('');
 
+/** sha256 (lowercase hex) of a string's UTF-8 bytes. */
+export const sha256Hex = async (text: string, subtle: SubtleCrypto = globalThis.crypto.subtle): Promise<string> =>
+  toHex(await subtle.digest('SHA-256', new TextEncoder().encode(text)));
+
 /** sha256 of the canonical pinned document, for the parity badge (C-21). */
-export const pinnedHash = async (
-  pinned: PinnedViz,
-  subtle: SubtleCrypto = globalThis.crypto.subtle,
-): Promise<string> => {
-  const bytes = new TextEncoder().encode(canonicalJson(pinnedDocument(pinned)));
-  return toHex(await subtle.digest('SHA-256', bytes));
+export const pinnedHash = (pinned: PinnedViz, subtle?: SubtleCrypto): Promise<string> => {
+  // Built first, so a number outside the contract's range rejects rather than hashing.
+  try {
+    return sha256Hex(canonicalJson(pinnedDocument(pinned)), subtle);
+  } catch (error) {
+    return Promise.reject(error);
+  }
 };

@@ -1,6 +1,8 @@
 import {
+  activeRunId,
   createThread,
   isInvocationActive,
+  latestRunId,
   threadReducer,
   type ThreadAction,
   type ThreadState,
@@ -72,7 +74,7 @@ describe('threadReducer', () => {
     expect(run.lastHeartbeatAt).toBe('2026-11-04T15:00:05.300Z');
     expect(run.flags).toEqual([]);
     expect(state.flags).toEqual([]);
-    expect(state.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: true, closed: false });
+    expect(state.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: true, closed: false, action: 'ask' });
     expect(isInvocationActive(state)).toBe(false);
   });
 
@@ -166,6 +168,7 @@ describe('threadReducer', () => {
       message: 'bad ids',
       turn: 'ask',
       question: 'second',
+      action: 'ask',
     });
     expect(isInvocationActive(state)).toBe(false);
   });
@@ -194,7 +197,7 @@ describe('threadReducer', () => {
       stopRequested: false,
     });
     expect(state.runs[RUN].view?.revision).toBe(4);
-    expect(state.notice).toEqual({ code: 'RUN_BUSY', message: 'busy', turn: 'cancel', question: null });
+    expect(state.notice).toEqual({ code: 'RUN_BUSY', message: 'busy', turn: 'cancel', question: null, action: 'cancel' });
     expect(isInvocationActive(state)).toBe(false);
   });
 
@@ -208,6 +211,7 @@ describe('threadReducer', () => {
       message: 'gone',
       turn: 'cancel',
       question: FINAL.question,
+      action: 'cancel',
     });
     expect(state.flags).toEqual([]);
     expect(isInvocationActive(state)).toBe(false);
@@ -247,7 +251,7 @@ describe('threadReducer', () => {
     ]);
     expect(state.runs[RUN].status).toBe('Executing');
     expect(state.runs[RUN].view?.revision).toBe(3);
-    expect(state.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: false, closed: false });
+    expect(state.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: false, closed: false, action: 'ask' });
     expect(state.flags).toEqual([]);
   });
 
@@ -365,5 +369,124 @@ describe('threadReducer', () => {
     const foreign = reduce([snapshot(2, { threadId: 'c'.repeat(32) })]);
     expect(foreign.runIds).toEqual([]);
     expect(foreign.flags).toEqual(['FOREIGN_THREAD']);
+  });
+});
+
+describe('threadReducer: turns, the view route and rejections', () => {
+  const older = 'a'.repeat(32);
+
+  it('opens the invocation a resume turn leaves on, so its events file under that run', () => {
+    const paused = reduce([submit(), started(), snapshot(4), finished('AwaitingConfirmation')]);
+    const resumed = reduce(
+      [{ type: 'turn', runId: RUN, kind: 'other', action: 'confirm' }, started(), snapshot(5), { type: 'STEP_STARTED', stepName: 's3' }],
+      paused,
+    );
+    expect(resumed.invocation).toEqual({ runId: RUN, kind: 'other', terminal: false, closed: false, action: 'confirm' });
+    expect(resumed.runs[RUN].view?.revision).toBe(5);
+    expect(resumed.runs[RUN].flags).toEqual([]);
+    expect(isInvocationActive(resumed)).toBe(true);
+  });
+
+  it('keeps the invocation a click opened when its turn leaves (submit, stop)', () => {
+    const asked = reduce([submit()]);
+    expect(reduce([{ type: 'turn', runId: RUN, kind: 'ask', action: 'ask' }], asked)).toBe(asked);
+  });
+
+  it('applies a view from the route over the last snapshot, status included, and clears a lost stream', () => {
+    const lost = reduce([
+      submit(),
+      started(),
+      snapshot(4),
+      { type: 'transportError', runId: RUN, code: 'NETWORK', message: 'reset', checking: true },
+    ]);
+    expect(lost.runs[RUN].transportError?.code).toBe('NETWORK');
+    const view = { ...FINAL, revision: 12 };
+    const state = reduce([{ type: 'view', view }], lost);
+    expect(state.runs[RUN]).toMatchObject({ status: 'ObservedOnly', transportError: null });
+    expect(state.runs[RUN].view?.revision).toBe(12);
+    // An older copy never replaces a newer one.
+    expect(reduce([{ type: 'view', view: { ...FINAL, revision: 3 } }], state)).toBe(state);
+  });
+
+  it('does not show a never-started run Failed while the view route is checked', () => {
+    const checking = reduce([
+      submit(),
+      { type: 'transportError', runId: RUN, code: 'UPSTREAM_TIMEOUT', message: 'slow', checking: true },
+    ]);
+    expect(checking.runs[RUN].status).toBe('Planning');
+    expect(isInvocationActive(checking)).toBe(false);
+    // The check failed too: now the run that never started is Failed.
+    const failed = reduce([{ type: 'transportError', runId: RUN, code: 'NETWORK', message: 'down' }], checking);
+    expect(failed.runs[RUN].status).toBe('Failed');
+  });
+
+  it('takes back an ask the BFF turned away, with its question and a notice', () => {
+    const state = reduce([submit(), { type: 'turnRejected', runId: RUN, code: 'UPSTREAM_UNAVAILABLE', message: 'down' }]);
+    expect(state.runIds).toEqual([]);
+    expect(state.notice).toEqual({
+      code: 'UPSTREAM_UNAVAILABLE',
+      message: 'down',
+      turn: 'ask',
+      question: FINAL.question,
+      action: 'ask',
+    });
+    expect(isInvocationActive(state)).toBe(false);
+  });
+
+  it('leaves a resumed run as its last snapshot showed it when the BFF turns the turn away', () => {
+    const paused = reduce([submit(), started(), snapshot(4), finished('AwaitingConfirmation')]);
+    const state = reduce(
+      [
+        { type: 'turn', runId: RUN, kind: 'other', action: 'confirm' },
+        { type: 'turnRejected', runId: RUN, code: 'SESSION_BUSY', message: 'busy' },
+      ],
+      paused,
+    );
+    expect(state.runs[RUN].status).toBe('AwaitingConfirmation');
+    expect(state.notice).toMatchObject({ code: 'SESSION_BUSY', turn: 'other', action: 'confirm', question: null });
+  });
+
+  it('ends a turn the view route answered for', () => {
+    const lost = reduce([
+      submit(),
+      started(),
+      snapshot(4),
+      { type: 'transportError', runId: RUN, code: 'NETWORK', message: 'reset', checking: true },
+      { type: 'turnSettled', runId: RUN },
+    ]);
+    expect(lost.invocation?.terminal).toBe(true);
+    expect(reduce([{ type: 'turnSettled', runId: older }], lost)).toBe(lost);
+  });
+
+  it('drops a run the view route does not store; a question that never ran goes back', () => {
+    const shown = reduce([submit(older, 'first'), started(older), snapshot(4, { runId: older }), finished('Complete', older)]);
+    const dropped = reduce([{ type: 'dropRun', runId: older }], shown);
+    expect(dropped.runIds).toEqual([]);
+    expect(dropped.notice).toBeNull();
+
+    const neverRan = reduce([submit(RUN, 'lost question')]);
+    const back = reduce([{ type: 'dropRun', runId: RUN }], neverRan);
+    expect(back.runIds).toEqual([]);
+    expect(back.invocation).toBeNull();
+    expect(back.notice).toMatchObject({ code: 'RUN_NOT_FOUND', turn: 'ask', question: 'lost question' });
+  });
+
+  it('names the run Stop applies to: the open stream, else the latest run while it is live', () => {
+    expect(activeRunId(reduce([submit(), started(), snapshot(4)]))).toBe(RUN);
+    const lost = reduce([
+      submit(),
+      started(),
+      snapshot(4),
+      { type: 'transportError', runId: RUN, code: 'NETWORK', message: 'reset', checking: true },
+    ]);
+    expect(isInvocationActive(lost)).toBe(false);
+    expect(activeRunId(lost)).toBe(RUN);
+    expect(activeRunId(reduce([submit(), ...EVENTS]))).toBeNull();
+    expect(latestRunId(reduce([submit(older, 'a'), submit(RUN, 'b')]))).toBe(RUN);
+  });
+
+  it('clears a stop once the run ends', () => {
+    const state = reduce([submit(), started(), snapshot(4), { type: 'stop', runId: RUN }, started(), finished('Cancelled')]);
+    expect(state.runs[RUN]).toMatchObject({ status: 'Cancelled', stopRequested: false });
   });
 });

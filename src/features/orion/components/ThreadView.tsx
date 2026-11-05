@@ -6,9 +6,9 @@ import { RunItem } from './RunItem';
 
 export interface ThreadViewProps {
   runs: RunState[];
+  /** A run is active: Esc in the thread stops it. */
   running: boolean;
   onStop: () => void;
-  onOpenApp: (appId: string) => void;
   /** The last rejected turn, shown after the runs. */
   notice?: ThreadNotice | null;
 }
@@ -16,8 +16,9 @@ export interface ThreadViewProps {
 /**
  * The conversation as an ARIA log. Its own live announcements are off: one polite
  * region beside it announces step changes, answers and notices, so nothing is read twice.
+ * Esc stops a run from here or the composer only, never inside a visualization card (C-18).
  */
-export const ThreadView = ({ runs, running, onStop, onOpenApp, notice = null }: ThreadViewProps) => {
+export const ThreadView = ({ runs, running, onStop, notice = null }: ThreadViewProps) => {
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Escape' || !running) return;
     // ProteinPaint's menus inside a viewer use Esc themselves.
@@ -36,7 +37,7 @@ export const ThreadView = ({ runs, running, onStop, onOpenApp, notice = null }: 
       className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
     >
       {runs.map((run) => (
-        <RunItem key={run.runId} run={run} onOpenApp={onOpenApp} />
+        <RunItem key={run.runId} run={run} />
       ))}
       {notice && (
         <p role="note" className="inline-flex items-center gap-1 text-sm">

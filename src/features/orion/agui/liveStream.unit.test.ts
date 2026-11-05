@@ -26,6 +26,11 @@ import type {
   RunView,
 } from './types';
 
+// The cards are under test here, not the viewers: a viz card is a plain stub.
+jest.mock('../viz/VizCard', () => ({
+  VizCard: () => null,
+}));
+
 /**
  * Replays streams captured from a running agent (orion/agent/.dev/*.sse in the sandbox
  * repo) through the parser, the reducer and the thread view, and checks each against the
@@ -118,7 +123,6 @@ const renderThread = (state: ThreadState): HTMLElement[] => {
       runs: threadRuns(state),
       running: false,
       onStop: jest.fn(),
-      onOpenApp: jest.fn(),
       notice: state.notice,
     }),
   );

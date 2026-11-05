@@ -2,19 +2,25 @@ import React, { forwardRef, useId } from 'react';
 import { Button, Textarea } from '@mantine/core';
 import { LuSend, LuSquare } from 'react-icons/lu';
 import { composerKeyAction } from './composerKeys';
+import { ScopeChip, type ScopeChipOption } from './ScopeChip';
 
 export interface ComposerProps {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
   onStop: () => void;
-  /** A run on this thread is streaming: Send becomes Stop. */
+  /** A run on this thread is active: Send becomes Stop. */
   running: boolean;
+  /** The stop is on its way: Stop shows it and waits. */
+  stopping?: boolean;
   scopeLabel: string;
+  /** Saved cohorts the scope chip can make active. */
+  scopeOptions?: readonly ScopeChipOption[];
+  onSwitchScope?: (option: ScopeChipOption) => void;
 }
 
 export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function Composer(
-  { value, onChange, onSend, onStop, running, scopeLabel },
+  { value, onChange, onSend, onStop, running, stopping = false, scopeLabel, scopeOptions = [], onSwitchScope },
   ref,
 ) {
   const scopeId = useId();
@@ -31,7 +37,7 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
     );
     if (action === 'send' || action === 'stop' || action === 'hold') event.preventDefault();
     if (action === 'send') onSend();
-    if (action === 'stop') onStop();
+    if (action === 'stop' && !stopping) onStop();
   };
 
   return (
@@ -46,24 +52,21 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
         onKeyDown={onKeyDown}
-        aria-describedby={scopeId}
+        // Mantine sets aria-describedby itself, from its description: the scope the question asks about.
+        description={scopeLabel.replace(/^Scope: /, 'Scope for this question: ')}
+        classNames={{ description: 'sr-only' }}
       />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {/* Switching scope from the chip lands on Day 1 PM. */}
-        <span
-          id={scopeId}
-          className="rounded-full border border-base-light px-3 py-1 text-xs"
-        >
-          {scopeLabel}
-        </span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <ScopeChip label={scopeLabel} labelId={scopeId} options={scopeOptions} onSwitch={onSwitchScope} />
         {running ? (
           <Button
             type="button"
             variant="outline"
             leftSection={<LuSquare aria-hidden focusable="false" />}
+            disabled={stopping}
             onClick={onStop}
           >
-            Stop
+            {stopping ? 'Stopping' : 'Stop'}
           </Button>
         ) : (
           <Button

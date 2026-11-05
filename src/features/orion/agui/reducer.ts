@@ -1,8 +1,12 @@
+import type { BffRouteErrorCode } from '../server/routes';
 import type { SseParseError } from './sseParser';
 import {
   END_STATUSES,
+  LEASED_STATUSES,
   REJECTION_CODES,
+  WAITING_STATUSES,
   type AguiEvent,
+  type OrionActionName,
   type OrionCode,
   type RejectionCode,
   type RunStatus,
@@ -51,7 +55,7 @@ export interface RunState {
   flags: RunFlag[];
 }
 
-/** What opened an invocation: a question, a Stop, or a stream the browser did not start here. */
+/** What opened an invocation: a question, a Stop, or any other turn (a resume, a stream joined). */
 export type InvocationKind = 'ask' | 'cancel' | 'other';
 
 /** One POST and its stream. Exactly one terminal event ends it. */
@@ -60,15 +64,21 @@ export interface Invocation {
   kind: InvocationKind;
   terminal: boolean;
   closed: boolean;
+  /** The action the turn sent; absent for a stream the browser did not start here. */
+  action?: OrionActionName;
 }
+
+/** Why a turn was turned away: an agent rejection, or the BFF's own error code. */
+export type NoticeCode = RejectionCode | BffRouteErrorCode;
 
 /** A turn the server rejected. It created no run and changed none. */
 export interface ThreadNotice {
-  code: RejectionCode;
+  code: NoticeCode;
   message: string;
   turn: InvocationKind;
   /** The question of the run the rejection took back, for the composer; null if none was. */
   question: string | null;
+  action?: OrionActionName;
 }
 
 export interface ThreadState {
@@ -84,15 +94,35 @@ export interface ThreadState {
 export type LocalAction =
   | { type: 'submit'; runId: string; question: string; at: string }
   | { type: 'stop'; runId: string }
+  /** A turn leaving the browser: its stream is the one id-less events now belong to. */
+  | { type: 'turn'; runId: string; kind: InvocationKind; action: OrionActionName }
   /** Stop before the ask left the browser: no turn reached the server, so none reports the end. */
   | { type: 'withdraw'; runId: string }
-  | { type: 'transportError'; runId: string; code: string; message: string }
-  | { type: 'protocolError'; runId: string; error: SseParseError };
+  /**
+   * The turn's stream failed. With `checking`, the browser reads the view route next, so a run
+   * that never started is not shown Failed in the meantime.
+   */
+  | { type: 'transportError'; runId: string; code: string; message: string; checking?: boolean }
+  | { type: 'protocolError'; runId: string; error: SseParseError }
+  /** The view route's copy of a run: the record wins (revision permitting), status included. */
+  | { type: 'view'; view: RunView }
+  /** A turn the BFF turned away, or one the view route showed never started. */
+  | { type: 'turnRejected'; runId: string; code: NoticeCode; message: string }
+  /** The view route has no such run (restore): it leaves the thread. */
+  | { type: 'dropRun'; runId: string }
+  /** The view route answered for a turn whose stream never ended it: the turn is over. */
+  | { type: 'turnSettled'; runId: string };
 
 export type ThreadAction = AguiEvent | LocalAction;
 
 const END: ReadonlySet<RunStatus> = new Set(END_STATUSES);
 export const isEndStatus = (status: RunStatus): boolean => END.has(status);
+
+const WAITING: ReadonlySet<RunStatus> = new Set(WAITING_STATUSES);
+export const isWaitingStatus = (status: RunStatus): boolean => WAITING.has(status);
+
+const LEASED: ReadonlySet<RunStatus> = new Set(LEASED_STATUSES);
+export const isLeasedStatus = (status: RunStatus): boolean => LEASED.has(status);
 
 const REJECTIONS: ReadonlySet<OrionCode> = new Set(REJECTION_CODES);
 export const isRejectionCode = (code: OrionCode): code is RejectionCode => REJECTIONS.has(code);
@@ -142,11 +172,12 @@ const dropRun = (state: ThreadState, runId: string): ThreadState => {
   return { ...state, runIds: state.runIds.filter((id) => id !== runId), runs };
 };
 
-const openInvocation = (runId: string, kind: InvocationKind): Invocation => ({
+const openInvocation = (runId: string, kind: InvocationKind, action?: OrionActionName): Invocation => ({
   runId,
   kind,
   terminal: false,
   closed: false,
+  ...(action ? { action } : {}),
 });
 
 /** The run that id-less events belong to: the one whose stream is still open. */
@@ -155,6 +186,22 @@ export const openRunId = (state: ThreadState): string | null =>
 
 export const isInvocationActive = (state: ThreadState): boolean =>
   !!state.invocation && !state.invocation.terminal && !state.invocation.closed;
+
+/** The thread's latest run: the only one that takes Retry step or an edit. */
+export const latestRunId = (state: ThreadState): string | null => state.runIds[state.runIds.length - 1] ?? null;
+
+/**
+ * The run Stop applies to: the one whose stream is open, else the latest run while it is still
+ * planning, executing or answering (a stream lost or restored, followed through the view route).
+ */
+export const activeRunId = (state: ThreadState): string | null => {
+  if (isInvocationActive(state) && state.invocation) return state.invocation.runId;
+  const latest = latestRunId(state);
+  const run = latest ? state.runs[latest] : undefined;
+  return run && !run.stopRequested && (run.status === 'Planning' || run.status === 'Executing' || run.status === 'Answering')
+    ? run.runId
+    : null;
+};
 
 const withOpenRun = (
   state: ThreadState,
@@ -191,16 +238,22 @@ const snapshotStatus = (run: RunState, view: RunView): RunStatus =>
  * Files the snapshot under its own run, which need not be the invocation's: a turn reports an
  * earlier run of the thread that it found Interrupted in the same stream.
  */
-const applySnapshot = (state: ThreadState, view: RunView): ThreadState => {
+const applySnapshot = (state: ThreadState, view: RunView, fromRoute = false): ThreadState => {
   if (view.threadId !== state.threadId) return flagThread(state, 'FOREIGN_THREAD');
   const run = state.runs[view.runId] ?? createRun(view.runId, view.question);
   if (run.view && view.revision <= run.view.revision) return state;
   const ended =
-    state.invocation?.runId === view.runId && state.invocation.terminal;
+    !fromRoute && state.invocation?.runId === view.runId && state.invocation.terminal;
+  // A stop the view shows done (or the run already over) needs no Stopping any more.
+  const stopRequested = run.stopRequested && !isEndStatus(view.status);
   return putRun(state, {
     ...run,
     question: run.question || view.question,
     view,
+    started: run.started || fromRoute,
+    stopRequested,
+    // A view that shows the run settled answers the lost stream.
+    transportError: fromRoute && !isLeasedStatus(view.status) ? null : run.transportError,
     // Within one invocation the terminal event has the last word on status.
     ...(ended ? {} : { status: snapshotStatus(run, view), code: view.code }),
   });
@@ -215,19 +268,23 @@ const endInvocation = (state: ThreadState): ThreadState =>
  * A Stop answered RUN_NOT_FOUND before any snapshot also takes its run back: the ask was
  * aborted before the agent launched it, so the run only ever existed in this browser.
  */
-const rejectInvocation = (
+const rejectTurn = (
   state: ThreadState,
   run: RunState,
-  code: RejectionCode,
+  code: NoticeCode,
   message: string,
 ): ThreadState => {
-  const turn = state.invocation?.kind ?? 'other';
-  const takeBack =
-    turn === 'ask' || (turn === 'cancel' && code === 'RUN_NOT_FOUND' && !run.view);
-  const ended: ThreadState = {
-    ...endInvocation(state),
-    notice: { code, message, turn, question: takeBack ? run.question : null },
+  const invocation = state.invocation?.runId === run.runId ? state.invocation : null;
+  const turn = invocation?.kind ?? 'other';
+  const takeBack = turn === 'ask' || (turn === 'cancel' && code === 'RUN_NOT_FOUND' && !run.view);
+  const notice: ThreadNotice = {
+    code,
+    message,
+    turn,
+    question: takeBack ? run.question : null,
+    ...(invocation?.action ? { action: invocation.action } : {}),
   };
+  const ended: ThreadState = { ...endInvocation(state), notice };
   if (takeBack) return dropRun(ended, run.runId);
   if (turn === 'cancel') {
     return putRun(ended, { ...run, stopRequested: false, status: run.view?.status ?? 'Planning' });
@@ -258,7 +315,7 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
     case 'submit': {
       if (state.runs[action.runId]) return state;
       const run = createRun(action.runId, action.question, action.at);
-      return { ...putRun(state, run), invocation: openInvocation(run.runId, 'ask'), notice: null };
+      return { ...putRun(state, run), invocation: openInvocation(run.runId, 'ask', 'ask'), notice: null };
     }
     case 'stop': {
       const run = state.runs[action.runId];
@@ -266,7 +323,24 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       // Stop is its own turn (`cancel`), so it opens a new invocation.
       return {
         ...putRun(state, { ...run, stopRequested: true, status: 'Stopping' }),
-        invocation: openInvocation(run.runId, 'cancel'),
+        invocation: openInvocation(run.runId, 'cancel', 'cancel'),
+        notice: null,
+      };
+    }
+    case 'turn': {
+      const run = state.runs[action.runId];
+      if (!run) return state;
+      const current = state.invocation;
+      // The click already opened this invocation (submit, stop): the turn leaving keeps it.
+      if (current?.runId === action.runId && current.kind === action.kind && !current.terminal && !current.closed) {
+        return current.action === action.action
+          ? state
+          : { ...state, invocation: { ...current, action: action.action } };
+      }
+      return {
+        ...state,
+        runs: run.transportError ? { ...state.runs, [run.runId]: { ...run, transportError: null } } : state.runs,
+        invocation: openInvocation(action.runId, action.kind, action.action),
         notice: null,
       };
     }
@@ -284,13 +358,15 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       const run = state.runs[action.runId];
       const invocation = state.invocation;
       if (!run || !invocation || invocation.runId !== action.runId) return state;
-      if (invocation.terminal || invocation.closed) return state;
+      if (invocation.terminal) return state;
+      // A closed stream takes a second report only when checking the view route failed too.
+      if (invocation.closed && run.transportError === null) return state;
       const failure = { code: action.code, message: action.message };
       return {
         ...putRun(state, {
           ...run,
           transportError: failure,
-          ...(run.started ? {} : { status: 'Failed' as const, errorMessage: action.message }),
+          ...(run.started || action.checking ? {} : { status: 'Failed' as const, errorMessage: action.message }),
         }),
         invocation: { ...invocation, closed: true },
       };
@@ -300,6 +376,27 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       return run
         ? putRun(state, { ...run, protocolErrors: [...run.protocolErrors, action.error] })
         : state;
+    }
+    case 'view':
+      return applySnapshot(state, action.view, true);
+    case 'turnRejected': {
+      const run = state.runs[action.runId];
+      return run ? rejectTurn(state, run, action.code, action.message) : state;
+    }
+    case 'turnSettled':
+      return state.invocation?.runId === action.runId && !state.invocation.terminal
+        ? endInvocation(state)
+        : state;
+    case 'dropRun': {
+      const run = state.runs[action.runId];
+      if (!run) return state;
+      const dropped = dropRun(state, action.runId);
+      const invocation = dropped.invocation?.runId === action.runId ? null : dropped.invocation;
+      // A question that never reached a run goes back to the composer, as a rejected ask does.
+      const notice: ThreadNotice | null = run.view
+        ? dropped.notice
+        : { code: 'RUN_NOT_FOUND', message: 'The run is not stored', turn: 'ask', question: run.question };
+      return { ...dropped, invocation, notice };
     }
     case 'RUN_STARTED': {
       if (action.threadId !== state.threadId) return flagThread(state, 'FOREIGN_THREAD');
@@ -324,7 +421,7 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       return withOpenRun(state, (run) => ({
         ...run,
         toolCalls: [
-          ...run.toolCalls,
+          ...run.toolCalls.filter((c) => c.id !== action.toolCallId),
           { id: action.toolCallId, name: action.toolCallName, args: '', ended: false },
         ],
       }));
@@ -339,7 +436,7 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
     case 'TEXT_MESSAGE_START':
       return withOpenRun(state, (run) => ({
         ...run,
-        messages: [...run.messages, { id: action.messageId, text: '', ended: false }],
+        messages: [...run.messages.filter((m) => m.id !== action.messageId), { id: action.messageId, text: '', ended: false }],
       }));
     case 'TEXT_MESSAGE_CONTENT':
       return withOpenRun(state, (run) =>
@@ -362,7 +459,13 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
       // Warmed and Recorded answer turns that carry no run status (warmup, a standalone viz_report).
       if (status === 'Warmed' || status === 'Recorded') return ended;
       if (!run) return flagThread(ended, 'UNKNOWN_RUN');
-      return putRun(ended, { ...run, status, code });
+      return putRun(ended, {
+        ...run,
+        status,
+        code,
+        stopRequested: run.stopRequested && !isEndStatus(status),
+        transportError: null,
+      });
     }
     case 'RUN_ERROR': {
       const runId = openRunId(state);
@@ -372,7 +475,7 @@ export const threadReducer = (state: ThreadState, action: ThreadAction): ThreadS
         return putRun(state, { ...run, flags: addFlag(run.flags, 'DOUBLE_TERMINAL') });
       }
       if (isRejectionCode(action.code)) {
-        return rejectInvocation(state, run, action.code, action.message);
+        return rejectTurn(state, run, action.code, action.message);
       }
       return putRun(endInvocation(state), {
         ...run,

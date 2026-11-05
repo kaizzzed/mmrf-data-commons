@@ -15,6 +15,7 @@ import { formatDuration } from '../format';
 import { openMenuScope } from './bodyMenus';
 import { LiveVizContext } from './liveViz';
 import { buildLauncherArgs, type LauncherArgs, pinnedHash } from './ppPinnedArgs';
+import { openViewerTap, type ViewerRequest } from './viewerRequests';
 
 /** What a card uses of a launcher's API: only OncoMatrix's has destroy() in 2.216.0. */
 interface PpAppApi {
@@ -22,48 +23,133 @@ interface PpAppApi {
   destroy?: () => void;
 }
 
-/** The package ships no types (`declare module` only), so the call is typed here. */
-type BindProteinPaint = (arg: {
-  rootElem: HTMLElement;
-  initArgs: LauncherArgs & { holder: HTMLElement };
-}) => Promise<PpAppApi | undefined>;
+/** rx component callbacks (`<event>.<namespace>`), as `opts.matrix.callbacks` takes them. */
+type RxCallbacks = Record<string, (() => void) | null>;
 
-export type VizPhase = 'frozen' | 'loading' | 'mounted' | 'error';
+type RenderOpts = { opts?: { matrix?: { callbacks: RxCallbacks } } };
+
+type InitArgs = LauncherArgs & RenderOpts & { holder: HTMLElement };
+
+/** The package ships no types (`declare module` only), so the call is typed here. */
+type BindProteinPaint = (arg: { rootElem: HTMLElement; initArgs: InitArgs }) => Promise<PpAppApi | undefined>;
+
+/** A viewer that has not drawn by then counts as failed (the A4 step timeout). */
+export const MOUNT_TIMEOUT_MS = 60_000;
+
+/** ProteinPaint's sayerror() bar, which runproteinpaint and the mass apps write into the holder. */
+const ERROR_SELECTOR = '.sja_errorbar';
+
+export type VizPhase = 'frozen' | 'blocked' | 'queued' | 'loading' | 'mounted' | 'error';
+
+/** How one live session ended: the viewer drew, or it failed (with ProteinPaint's message). */
+export type ViewerOutcome = { kind: 'mounted'; ms: number } | { kind: 'failed'; ms: number; message: string };
 
 interface Session {
-  phase: Exclude<VizPhase, 'frozen'>;
+  phase: 'queued' | 'loading' | 'mounted' | 'error';
   ms?: number;
   message?: string;
 }
 
 export interface OrionPpCardProps {
   vizId: string;
-  title: string;
-  /** Read once, at first render: the card never follows later props or the live cohort. */
-  pinned: PinnedViz;
+  title: ReactNode;
+  /**
+   * Read once, when first non-null: the card never follows later props or the live cohort. Null
+   * (a trimmed snapshot still loading its inputs) keeps the card blocked.
+   */
+  pinned: PinnedViz | null;
   caption?: ReactNode;
+  /** The first line under the header, such as the cohort the card is pinned to. */
+  subtitle?: ReactNode;
   host?: string;
+  /** The live-registry key; defaults to vizId. Viz ids are unique within a run only. */
+  liveKey?: string;
+  /** While set, the card takes no live slot and shows this line and `blockedView`. */
+  blockedReason?: string | null;
+  /** What a blocked card shows under its reason; defaults to `frozenView`. */
+  blockedView?: ReactNode;
+  /** What a card frozen by the two-live cap shows above Re-open live (its cited output). */
+  frozenView?: ReactNode;
+  /** Replaces the header's pinned-hash line, such as with the parity badge. */
+  badge?: ReactNode;
+  /** The card's action buttons, under the viewer. */
+  actions?: ReactNode;
+  /** Shown last, such as the viewer's requests. */
+  children?: ReactNode;
+  className?: string;
+  /** Called once per live session, when the viewer has drawn or failed. */
+  onOutcome?: (outcome: ViewerOutcome) => void;
+  /** Each request the viewer makes while this card owns it (viewerRequests.ts). */
+  onRequest?: (request: ViewerRequest) => void;
+  mountTimeoutMs?: number;
 }
+
+const errorText = (root: HTMLElement): string | null => {
+  const bar = root.querySelector(ERROR_SELECTOR);
+  // The bar's first child is its close cross; the message follows.
+  const text = bar?.lastElementChild?.textContent ?? bar?.textContent ?? null;
+  return text === null ? null : text.trim() || 'The viewer reported an error.';
+};
+
+/**
+ * OncoMatrix's bindProteinPaint promise resolves before the matrix request (spike, "What Day 1
+ * PM and Day 2 viz work must know" 3), so its card waits for the matrix component's own
+ * postRender or error event. The Correlation and DE launchers resolve after their first render.
+ */
+const withRenderCallbacks = (args: LauncherArgs, onRendered: () => void, onError: () => void): LauncherArgs & RenderOpts =>
+  'launchGdcMatrix' in args
+    ? { ...args, opts: { matrix: { callbacks: { 'postRender.orion': onRendered, 'error.orion': onError } } } }
+    : args;
 
 /**
  * A native ProteinPaint viewer pinned to a run's inputs. At most two cards hold a live viewer;
- * an older one freezes and tears its viewer down until Re-open live.
+ * an older one freezes and tears its viewer down until Re-open live. Viewers start one at a time,
+ * so each card can name the requests its viewer made.
  */
-export const OrionPpCard = ({ vizId, title, pinned, caption, host = PROTEINPAINT_API }: OrionPpCardProps) => {
+export const OrionPpCard = ({
+  vizId,
+  title,
+  pinned,
+  caption,
+  subtitle,
+  host = PROTEINPAINT_API,
+  liveKey = vizId,
+  blockedReason = null,
+  blockedView,
+  frozenView,
+  badge,
+  actions,
+  children,
+  className,
+  onOutcome,
+  onRequest,
+  mountTimeoutMs = MOUNT_TIMEOUT_MS,
+}: OrionPpCardProps) => {
   const titleId = useId();
   const registry = useContext(LiveVizContext);
-  const live = useSyncExternalStore(registry.subscribe, registry.snapshot, registry.snapshot).includes(vizId);
-  const [frozenInputs] = useState(() => ({ pinned, host }));
+  const inRegistry = useSyncExternalStore(registry.subscribe, registry.snapshot, registry.snapshot).includes(liveKey);
+  const [frozenInputs, setFrozenInputs] = useState(() => (pinned ? { pinned, host } : null));
   const [hash, setHash] = useState<string | null>(null);
-  const [session, setSession] = useState<Session>({ phase: 'loading' });
+  const [session, setSession] = useState<Session>({ phase: 'queued' });
   const viewerRef = useRef<HTMLDivElement>(null);
+  const callbacks = useRef({ onOutcome, onRequest });
+  callbacks.current = { onOutcome, onRequest };
+
+  const blocked = blockedReason !== null || frozenInputs === null;
+  const live = inRegistry && !blocked;
 
   useEffect(() => {
-    registry.activate(vizId);
-    return () => registry.release(vizId);
-  }, [registry, vizId]);
+    if (!frozenInputs && pinned) setFrozenInputs({ pinned, host });
+  }, [frozenInputs, pinned, host]);
 
   useEffect(() => {
+    if (blocked) return undefined;
+    registry.activate(liveKey);
+    return () => registry.release(liveKey);
+  }, [registry, liveKey, blocked]);
+
+  useEffect(() => {
+    if (!frozenInputs) return undefined;
     let current = true;
     pinnedHash(frozenInputs.pinned).then(
       (value) => current && setHash(value),
@@ -76,40 +162,64 @@ export const OrionPpCard = ({ vizId, title, pinned, caption, host = PROTEINPAINT
 
   useEffect(() => {
     const viewer = viewerRef.current;
-    if (!live || !viewer) return;
+    if (!live || !viewer || !frozenInputs) return undefined;
     // bindProteinPaint keys its instances by rootElem and never unbinds, so every live
     // session needs a fresh element.
     const rootElem = document.createElement('div');
     viewer.appendChild(rootElem);
-    const menus = openMenuScope();
-    const started = performance.now();
+    const tap = openViewerTap(frozenInputs.host, () => viewerRef.current, (r) => callbacks.current.onRequest?.(r));
     let disposed = false;
-    setSession({ phase: 'loading' });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let started = 0;
+    let menus: ReturnType<typeof openMenuScope> | null = null;
+    setSession({ phase: 'queued' });
 
-    const app = import('@sjcrh/proteinpaint-client').then(
-      ({ bindProteinPaint }: { bindProteinPaint: BindProteinPaint }) =>
-        disposed
-          ? undefined
-          : bindProteinPaint({
-              rootElem,
-              initArgs: { ...buildLauncherArgs(frozenInputs.pinned, frozenInputs.host), holder: rootElem },
-            }),
-    );
+    const settle = (outcome: { kind: 'mounted' } | { kind: 'failed'; message: string }) => {
+      if (settled || disposed) return;
+      settled = true;
+      clearTimeout(timer);
+      tap.mountDone();
+      const ms = performance.now() - started;
+      setSession(outcome.kind === 'mounted' ? { phase: 'mounted', ms } : { phase: 'error', ms, message: outcome.message });
+      callbacks.current.onOutcome?.(outcome.kind === 'mounted' ? { kind: 'mounted', ms } : { ...outcome, ms });
+    };
+    const rendered = () => {
+      const message = errorText(rootElem);
+      settle(message ? { kind: 'failed', message } : { kind: 'mounted' });
+    };
+    const failedRender = () => settle({ kind: 'failed', message: errorText(rootElem) ?? 'The viewer reported an error.' });
+    const launcherArgs = withRenderCallbacks(buildLauncherArgs(frozenInputs.pinned, frozenInputs.host), rendered, failedRender);
+    const waitsForRender = 'opts' in launcherArgs;
+
+    const app: Promise<PpAppApi | undefined> = tap.mountTurn().then(async () => {
+      if (disposed) return undefined;
+      setSession({ phase: 'loading' });
+      menus = openMenuScope();
+      started = performance.now();
+      timer = setTimeout(
+        () => settle({ kind: 'failed', message: `The viewer did not finish drawing within ${formatDuration(mountTimeoutMs)}.` }),
+        mountTimeoutMs,
+      );
+      const { bindProteinPaint } = (await import('@sjcrh/proteinpaint-client')) as { bindProteinPaint: BindProteinPaint };
+      if (disposed) return undefined;
+      return bindProteinPaint({ rootElem, initArgs: { ...launcherArgs, holder: rootElem } });
+    });
     app.then(
       (api) => {
         if (disposed) return;
         // runproteinpaint catches its own errors and writes them into the holder.
-        setSession(
-          api
-            ? { phase: 'mounted', ms: performance.now() - started }
-            : { phase: 'error', message: rootElem.textContent || 'The viewer did not start.' },
-        );
+        if (!api) settle({ kind: 'failed', message: errorText(rootElem) ?? (rootElem.textContent || 'The viewer did not start.') });
+        else if (errorText(rootElem)) failedRender();
+        else if (!waitsForRender) settle({ kind: 'mounted' });
       },
-      (error: unknown) => !disposed && setSession({ phase: 'error', message: String(error) }),
+      (error: unknown) => settle({ kind: 'failed', message: error instanceof Error ? error.message : String(error) }),
     );
 
     return () => {
       disposed = true;
+      clearTimeout(timer);
+      tap.close();
       rootElem.remove();
       // A viewer still starting keeps adding menus; release them once it settles.
       void app
@@ -118,14 +228,16 @@ export const OrionPpCard = ({ vizId, title, pinned, caption, host = PROTEINPAINT
           api?.triggerAbort?.('ORION card closed');
           api?.destroy?.();
           rootElem.replaceChildren();
-          menus.release();
+          menus?.release();
         });
     };
-  }, [live, frozenInputs]);
+  }, [live, frozenInputs, mountTimeoutMs]);
 
-  const phase: VizPhase = live ? session.phase : 'frozen';
+  const phase: VizPhase = blocked ? 'blocked' : live ? session.phase : 'frozen';
   const statusText = {
+    blocked: 'Not live',
     frozen: 'Frozen',
+    queued: 'Waiting to start',
     loading: 'Loading viewer',
     mounted: `Live${session.ms === undefined ? '' : ` · ready in ${formatDuration(session.ms)}`}`,
     error: 'Viewer failed',
@@ -135,17 +247,19 @@ export const OrionPpCard = ({ vizId, title, pinned, caption, host = PROTEINPAINT
     <Card
       titleId={titleId}
       title={title}
+      className={className}
       status={
-        <span className="text-xs" data-testid="orion-viz-status">
-          {statusText}
-          {hash && (
-            <>
-              {' · pinned '}
-              <span className="font-mono" title={hash}>
-                {hash.slice(0, 12)}
+        <span className="flex flex-wrap items-center gap-2 text-xs" data-testid="orion-viz-status">
+          <span>{statusText}</span>
+          {badge ??
+            (hash && (
+              <span>
+                {'pinned '}
+                <span className="font-mono" title={hash}>
+                  {hash.slice(0, 12)}
+                </span>
               </span>
-            </>
-          )}
+            ))}
         </span>
       }
       data-orion-viz
@@ -154,26 +268,43 @@ export const OrionPpCard = ({ vizId, title, pinned, caption, host = PROTEINPAINT
         data-testid={`orion-viz-${vizId}`}
         data-viz-id={vizId}
         data-phase={phase}
-        data-mount-ms={session.ms === undefined ? undefined : Math.round(session.ms)}
+        data-mount-ms={session.ms === undefined || !live ? undefined : Math.round(session.ms)}
         data-pinned-hash={hash ?? undefined}
         className="flex flex-col gap-2"
       >
-        {caption && <p className="text-sm">{caption}</p>}
+        {subtitle}
         {phase === 'error' && session.message && (
           <p role="alert" className="text-sm">
             {session.message}
           </p>
         )}
         {live ? (
-          <div ref={viewerRef} className="min-h-[120px] overflow-x-auto bg-white" />
+          <>
+            <div ref={viewerRef} className="min-h-[120px] overflow-x-auto bg-white" />
+            {caption && <p className="text-sm">{caption}</p>}
+          </>
+        ) : blocked ? (
+          <>
+            {blockedReason && (
+              <p role="status" className="text-sm">
+                {blockedReason}
+              </p>
+            )}
+            {blockedView ?? frozenView}
+          </>
         ) : (
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span>Frozen so that at most two viewers stay live on this page.</span>
-            <Button type="button" size="xs" variant="outline" onClick={() => registry.activate(vizId)}>
-              Re-open live
-            </Button>
-          </div>
+          <>
+            {frozenView}
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <span>Frozen so that at most two viewers stay live on this page.</span>
+              <Button type="button" size="xs" variant="outline" onClick={() => registry.activate(liveKey)}>
+                Re-open live
+              </Button>
+            </div>
+          </>
         )}
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+        {children}
       </div>
     </Card>
   );

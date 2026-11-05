@@ -1,75 +1,99 @@
 import React, { useId } from 'react';
 import { Button } from '@mantine/core';
-import type { Limitation, NearestApp } from '../agui/types';
+import type { AppId, Fact, Limitation, NearestApp } from '../agui/types';
 import { RunStatusLabel } from '../components/StatusLabel';
+import { SYNTHETIC_NOTICE } from '../constants';
+import { LimitationLine } from './AnswerCard';
 import { Card } from './Card';
+import { factMap } from './FactChip';
 
-export type LimitationCardProps = { limitations: Limitation[] } & (
-  | { variant?: 'limited' }
-  | {
-      variant: 'unsupported';
-      /** Click-only hand-off: the app opens on the active cohort in this tab. */
-      onOpenOnCohort: (appId: string) => void;
-    }
-);
+export interface LimitationCardProps {
+  variant?: 'limited' | 'unsupported';
+  limitations: Limitation[];
+  facts?: readonly Fact[];
+  /** The deployment's notice, which ends every limitation card. */
+  notice?: string;
+  onCite?: (factId: string) => void;
+  /** Click-only hand-off: the nearest app opens in this tab on the run's cohort. Absent: none offered. */
+  onOpenOnCohort?: (appId: AppId) => void;
+  /** Why the hand-off is off, such as Don't save (WRITE_SKIPPED); the button stays, disabled, with it. */
+  handoffDisabledReason?: string | null;
+}
 
 const NearestAppLine = ({
   nearestApp,
   onOpenOnCohort,
+  disabledReason,
 }: {
   nearestApp: NearestApp;
-  onOpenOnCohort: (appId: string) => void;
-}) => (
-  <div className="flex flex-wrap items-center gap-3 text-sm">
-    <span>
-      <span className="font-medium">Nearest app:</span> {nearestApp.title}
-    </span>
-    <Button
-      type="button"
-      variant="outline"
-      size="xs"
-      onClick={() => onOpenOnCohort(nearestApp.appId)}
-    >
-      Open on this cohort
-    </Button>
-  </div>
-);
+  onOpenOnCohort: (appId: AppId) => void;
+  disabledReason: string | null;
+}) => {
+  const reasonId = useId();
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-sm">
+      <span>
+        <span className="font-medium">Nearest app:</span> {nearestApp.title}
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="xs"
+        disabled={disabledReason !== null}
+        aria-describedby={disabledReason ? reasonId : undefined}
+        onClick={() => onOpenOnCohort(nearestApp.appId)}
+      >
+        Open on this cohort
+      </Button>
+      {disabledReason && (
+        <span id={reasonId} className="text-xs">
+          {disabledReason}
+        </span>
+      )}
+    </div>
+  );
+};
 
-/** What is missing, why it blocks the answer, and what would unblock it. */
-export const LimitationCard = (props: LimitationCardProps) => {
+const NO_FACTS: readonly Fact[] = [];
+
+/** What is missing, why it blocks the answer, and what would unblock it (FR-17, C-06). */
+export const LimitationCard = ({
+  variant = 'limited',
+  limitations,
+  facts = NO_FACTS,
+  notice = SYNTHETIC_NOTICE,
+  onCite,
+  onOpenOnCohort,
+  handoffDisabledReason = null,
+}: LimitationCardProps) => {
   const titleId = useId();
-  const unsupported = props.variant === 'unsupported';
+  const unsupported = variant === 'unsupported';
+  const lookup = factMap(facts);
   // With no app listed, the card says nothing about which apps exist.
-  const nearestApp: NearestApp | undefined = props.limitations.flatMap((l) => l.nearestApps)[0];
+  const nearestApp: NearestApp | undefined = limitations.flatMap((l) => l.nearestApps)[0];
   return (
     <Card
       titleId={titleId}
       title={unsupported ? 'This question is not supported' : 'A limitation stopped this run'}
-      status={
-        <RunStatusLabel
-          status={unsupported ? 'Unsupported' : 'Limited'}
-          className="text-sm font-medium"
-        />
-      }
+      status={<RunStatusLabel status={unsupported ? 'Unsupported' : 'Limited'} className="text-sm font-medium" />}
     >
-      {props.limitations.length > 0 && (
+      {limitations.length > 0 && (
         <ul className="flex flex-col gap-2 text-sm">
-          {props.limitations.map((limitation, i) => (
+          {limitations.map((limitation, i) => (
             <li key={`${limitation.code}-${i}`}>
-              <p>{limitation.text}</p>
-              {limitation.unblock && (
-                <p>
-                  <span className="font-medium">What would unblock it:</span>{' '}
-                  {limitation.unblock}
-                </p>
-              )}
+              <LimitationLine limitation={limitation} facts={lookup} onCite={onCite} />
             </li>
           ))}
         </ul>
       )}
-      {props.variant === 'unsupported' && nearestApp && (
-        <NearestAppLine nearestApp={nearestApp} onOpenOnCohort={props.onOpenOnCohort} />
+      {nearestApp && onOpenOnCohort && (
+        <NearestAppLine
+          nearestApp={nearestApp}
+          onOpenOnCohort={onOpenOnCohort}
+          disabledReason={handoffDisabledReason}
+        />
       )}
+      <p className="text-xs">{notice}</p>
     </Card>
   );
 };

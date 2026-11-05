@@ -22,6 +22,7 @@ const useElapsedMs = (active: boolean): number | null => {
   return active && startedAt !== null ? now - startedAt : null;
 };
 
+/** What follows the step's word: elapsed time, duration, the reason it was skipped, its code. */
 export const stepDetail = (step: Step, elapsedMs: number | null): string | null => {
   switch (step.status) {
     case 'Running':
@@ -34,26 +35,47 @@ export const stepDetail = (step: Step, elapsedMs: number | null): string | null 
       return step.outputSummary;
     case 'Failed':
       return step.code;
+    case 'Reused':
+      return step.reusedFrom
+        ? `from version ${step.reusedFrom.planVersion}${step.reusedFrom.stepId === step.id ? '' : ` · ${step.reusedFrom.stepId}`}`
+        : null;
     default:
       return null;
   }
 };
 
-/** One tool call: status word and icon, duration, input and output, and its JSON. */
-export const StepRow = ({ step }: { step: Step }) => {
+export interface StepRowProps {
+  step: Step;
+  /** Retry step: offered for a failed read on the thread's latest run only. */
+  onRetry?: () => void;
+  /** Opens the step, its calls and facts in the Evidence Inspector. */
+  onInspect?: () => void;
+}
+
+/** One counted call: status word and icon, duration, input and output, and its JSON. */
+export const StepRow = ({ step, onRetry, onInspect }: StepRowProps) => {
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
   const inFlight = step.status === 'Running' || step.status === 'Retrying';
   const elapsedMs = useElapsedMs(inFlight);
+  const name = `${step.id} ${step.tool}`;
 
   return (
     <li className={`flex flex-col gap-1 ${step.folded ? 'pl-4 text-xs' : 'text-sm'}`}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <StepStatusLabel status={step.status} detail={stepDetail(step, elapsedMs)} />
-        <span className="font-mono text-xs">
-          {step.id} {step.tool}
-        </span>
+        <span className="font-mono text-xs">{name}</span>
         {step.folded && <span className="text-xs italic">folded step</span>}
+        {onRetry && (
+          <Button type="button" variant="outline" size="compact-xs" onClick={onRetry} aria-label={`Retry step ${name}`}>
+            Retry step
+          </Button>
+        )}
+        {onInspect && (
+          <Button type="button" variant="subtle" size="compact-xs" onClick={onInspect} aria-label={`Inspect ${name}`}>
+            Inspect
+          </Button>
+        )}
         <Button
           type="button"
           variant="subtle"

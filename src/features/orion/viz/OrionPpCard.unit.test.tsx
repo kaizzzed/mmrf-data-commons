@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { webcrypto } from 'crypto';
 import type { PinnedViz } from '../agui/types';
 import { createLiveVizRegistry, LiveVizContext, type LiveVizRegistry } from './liveViz';
-import { OrionPpCard } from './OrionPpCard';
+import { OrionPpCard, type ViewerOutcome } from './OrionPpCard';
 
 interface BindCall {
   rootElem: HTMLElement;
@@ -13,8 +13,13 @@ interface BindCall {
   updateArgs?: unknown;
 }
 
-const mockApps: { triggerAbort: jest.Mock; destroy: jest.Mock }[] = [];
+type MockApp = { triggerAbort: jest.Mock; destroy: jest.Mock };
+const mockApps: MockApp[] = [];
+/** One-off behaviours for the next binds; a plain bind mounts. */
+const mockNext: ((arg: BindCall) => Promise<MockApp | undefined>)[] = [];
 const mockBind = jest.fn((arg: BindCall) => {
+  const next = mockNext.shift();
+  if (next) return next(arg);
   // Like a ProteinPaint Menu: a body-level div per mount, plus content in the holder.
   const menu = document.createElement('div');
   menu.className = 'sja_menu_div';
@@ -54,6 +59,7 @@ beforeAll(() => {
 beforeEach(() => {
   mockBind.mockClear();
   mockApps.length = 0;
+  mockNext.length = 0;
 });
 
 describe('<OrionPpCard />', () => {
@@ -111,5 +117,122 @@ describe('<OrionPpCard />', () => {
     expect(mockApps[0].triggerAbort).toHaveBeenCalled();
     expect(mockApps[0].destroy).toHaveBeenCalled();
     expect(registry.snapshot()).toEqual([]);
+  });
+
+  it.each<[string, (arg: BindCall) => Promise<MockApp | undefined>, string]>([
+    ['a rejected bind', () => Promise.reject(new Error('no such chart')), 'no such chart'],
+    ['no app (runproteinpaint wrote its error into the holder)', (arg) => {
+      arg.rootElem.textContent = 'Error: unknown dslabel';
+      return Promise.resolve(undefined);
+    }, 'Error: unknown dslabel'],
+    ['an error bar in the holder', (arg) => {
+      arg.rootElem.innerHTML = '<div class="sja_errorbar"><div>x</div><div>Error: termdb/survival 500</div></div>';
+      return Promise.resolve({ triggerAbort: jest.fn(), destroy: jest.fn() });
+    }, 'Error: termdb/survival 500'],
+  ])('reports a failed session on %s, with the message', async (_label, behaviour, message) => {
+    mockNext.push(behaviour);
+    const outcomes: ViewerOutcome[] = [];
+    renderCards(
+      createLiveVizRegistry(),
+      <OrionPpCard vizId="a" title="A" pinned={survival} host="/protein-paint" onOutcome={(o) => outcomes.push(o)} />,
+    );
+    await waitFor(() => expect(phaseOf('a')).toBe('error'));
+    expect(screen.getByRole('alert')).toHaveTextContent(message);
+    expect(outcomes).toEqual([{ kind: 'failed', ms: expect.any(Number), message }]);
+  });
+
+  it('reports one mounted outcome per live session', async () => {
+    const outcomes: ViewerOutcome[] = [];
+    renderCards(
+      createLiveVizRegistry(),
+      <OrionPpCard vizId="a" title="A" pinned={survival} host="/protein-paint" onOutcome={(o) => outcomes.push(o)} />,
+    );
+    await waitFor(() => expect(phaseOf('a')).toBe('mounted'));
+    expect(outcomes).toEqual([{ kind: 'mounted', ms: expect.any(Number) }]);
+  });
+
+  it('starts one viewer at a time: the next waits until the first has drawn', async () => {
+    let finish: (app: MockApp) => void = () => undefined;
+    mockNext.push(() => new Promise<MockApp>((resolve) => (finish = resolve)));
+    renderCards(createLiveVizRegistry(), <>{['a', 'b'].map((id) => card(id))}</>);
+    await waitFor(() => expect(mockBind).toHaveBeenCalledTimes(1));
+    expect(phaseOf('a')).toBe('loading');
+    expect(phaseOf('b')).toBe('queued');
+    expect(screen.getByTestId('orion-viz-b').closest('section')).toHaveTextContent('Waiting to start');
+    await act(async () => finish({ triggerAbort: jest.fn(), destroy: jest.fn() }));
+    await waitFor(() => expect(phaseOf('b')).toBe('mounted'));
+    expect(phaseOf('a')).toBe('mounted');
+  });
+
+  it('a blocked card takes no live slot and never binds, so it freezes no other card', async () => {
+    const registry = createLiveVizRegistry();
+    renderCards(
+      registry,
+      <>
+        {card('a')}
+        {card('b')}
+        <OrionPpCard
+          vizId="c"
+          title="C"
+          pinned={survival}
+          blockedReason="Checking the local data."
+          blockedView={<p>Cited table</p>}
+        />
+      </>,
+    );
+    await waitFor(() => expect(mockBind).toHaveBeenCalledTimes(2));
+    expect(registry.snapshot()).toEqual(['a', 'b']);
+    expect(phaseOf('c')).toBe('blocked');
+    const blocked = screen.getByTestId('orion-viz-c');
+    expect(within(blocked).getByRole('status')).toHaveTextContent('Checking the local data.');
+    expect(within(blocked).getByText('Cited table')).toBeInTheDocument();
+    expect(within(blocked).queryByRole('button', { name: 'Re-open live' })).not.toBeInTheDocument();
+  });
+
+  it('waits for pinned inputs, then reads them once; the registry key may differ from the viz id', async () => {
+    const registry = createLiveVizRegistry();
+    const ui = (pinned: PinnedViz | null) => (
+      <MantineProvider>
+        <LiveVizContext.Provider value={registry}>
+          <OrionPpCard vizId="v1" liveKey="run-1:v1" title="A" pinned={pinned} host="/protein-paint" />
+        </LiveVizContext.Provider>
+      </MantineProvider>
+    );
+    const { rerender } = render(ui(null));
+    expect(phaseOf('v1')).toBe('blocked');
+    expect(mockBind).not.toHaveBeenCalled();
+    rerender(ui(survival));
+    await waitFor(() => expect(phaseOf('v1')).toBe('mounted'));
+    expect(registry.snapshot()).toEqual(['run-1:v1']);
+    rerender(ui({ ...survival, overlay: 'iss_stage' }));
+    expect(mockBind).toHaveBeenCalledTimes(1);
+    expect(mockBind.mock.calls[0][0].initArgs).toMatchObject({ state: { plots: [{ term2: { id: 'cgs_risk_category' } }] } });
+  });
+
+  it('asks OncoMatrix for its postRender event and counts it mounted only then', async () => {
+    let rendered: (() => void) | undefined;
+    mockNext.push((arg) => {
+      const opts = arg.initArgs.opts as { matrix: { callbacks: Record<string, () => void> } };
+      rendered = opts.matrix.callbacks['postRender.orion'];
+      return Promise.resolve({ triggerAbort: jest.fn(), destroy: jest.fn() });
+    });
+    const outcomes: ViewerOutcome[] = [];
+    renderCards(
+      createLiveVizRegistry(),
+      <OrionPpCard
+        vizId="m"
+        title="M"
+        pinned={{ kind: 'oncomatrix', filter0: null, genes: ['KRAS'] }}
+        host="/protein-paint"
+        onOutcome={(o) => outcomes.push(o)}
+      />,
+    );
+    await waitFor(() => expect(rendered).toBeDefined());
+    await act(async () => undefined);
+    expect(phaseOf('m')).toBe('loading');
+    expect(outcomes).toEqual([]);
+    await act(async () => rendered?.());
+    expect(phaseOf('m')).toBe('mounted');
+    expect(outcomes).toEqual([{ kind: 'mounted', ms: expect.any(Number) }]);
   });
 });

@@ -30,7 +30,7 @@ describe('tab storage', () => {
   it('closes a stream that was open when the tab was saved', () => {
     saveTab(streamingTab());
     const thread = loadTab()?.threads[THREAD];
-    expect(thread?.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: false, closed: true });
+    expect(thread?.invocation).toEqual({ runId: RUN, kind: 'ask', terminal: false, closed: true, action: 'ask' });
     expect(thread?.runs[RUN].transportError?.code).toBe('STREAM_ENDED');
   });
 

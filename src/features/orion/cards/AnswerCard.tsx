@@ -1,30 +1,31 @@
 import React, { useId } from 'react';
-import { LuPenLine } from 'react-icons/lu';
-import type { Fact, RunStatus, RunView, Sentence } from '../agui/types';
+import { Button } from '@mantine/core';
+import { LuExternalLink, LuMessageSquarePlus, LuPenLine } from 'react-icons/lu';
+import type { FollowUp, Limitation, OpenLink, RunStatus, RunView, Sentence, VerifierRule } from '../agui/types';
 import { SYNTHETIC_NOTICE } from '../constants';
-import { citationLabel } from '../format';
 import { Card } from './Card';
+import { factMap, Segments, type FactLookup } from './FactChip';
 
-const CHIP_CLASS =
-  'ml-1 inline-flex items-center rounded-full border border-base-light px-2 py-px align-baseline font-mono text-xs';
+const DEFAULT_WITHHELD_REASON: Partial<Record<RunStatus, string>> = {
+  Partial: 'a step failed',
+  Cancelled: 'you stopped the run',
+  Interrupted: 'the run was interrupted',
+  ObservedOnly: 'the model text did not pass verification',
+  Limited: 'a limitation stopped the run',
+};
 
-const CitationChip = ({
-  fact,
-  factId,
-  onCite,
-}: {
-  fact: Fact | undefined;
-  factId: string;
-  onCite?: (factId: string) => void;
-}) => {
-  const label = fact ? citationLabel(fact) : `Unresolved · ${factId}`;
-  return onCite ? (
-    <button type="button" className={`${CHIP_CLASS} hover:bg-base-lightest`} onClick={() => onCite(factId)}>
-      {label}
-    </button>
-  ) : (
-    <span className={CHIP_CLASS}>{label}</span>
-  );
+export const withheldLine = (view: Pick<RunView, 'withheldReason'>, status: RunStatus): string =>
+  `Interpretation withheld: ${
+    view.withheldReason ?? DEFAULT_WITHHELD_REASON[status] ?? 'no interpretation is available'
+  }`;
+
+const DROPPED_RULE: Record<VerifierRule, string> = {
+  'V-NUM': 'it stated a number no tool returned',
+  'V-REF': 'it cited no fact',
+  'V-ENT': 'it named something no tool returned',
+  'V-SEC': 'it broke a safety rule',
+  'V-COMP': 'it left out a required part',
+  'V-LIM': 'it contradicted a limitation',
 };
 
 const SentenceText = ({
@@ -33,60 +34,83 @@ const SentenceText = ({
   onCite,
 }: {
   sentence: Sentence;
-  facts: ReadonlyMap<string, Fact>;
+  facts: FactLookup;
+  onCite?: (factId: string) => void;
+}) =>
+  sentence.dropped ? (
+    <p className="text-sm italic">
+      A sentence was removed by the verifier ({sentence.dropped}): {DROPPED_RULE[sentence.dropped]}.
+    </p>
+  ) : (
+    <p className="text-sm leading-relaxed">
+      <Segments segments={sentence.segments} facts={facts} onCite={onCite} />
+    </p>
+  );
+
+export const LimitationLine = ({
+  limitation,
+  facts,
+  onCite,
+}: {
+  limitation: Limitation;
+  facts: FactLookup;
   onCite?: (factId: string) => void;
 }) => (
-  <p className="text-sm leading-relaxed">
-    {sentence.segments.map((segment, i) =>
-      segment.factId ? (
-        <span key={i}>
-          <span className="font-semibold">{segment.text}</span>
-          <CitationChip fact={facts.get(segment.factId)} factId={segment.factId} onCite={onCite} />
-        </span>
+  <>
+    <p>
+      {limitation.segments ? (
+        <Segments segments={limitation.segments} facts={facts} onCite={onCite} />
       ) : (
-        <span key={i}>{segment.text}</span>
-      ),
+        limitation.text
+      )}
+    </p>
+    {limitation.unblock && (
+      <p>
+        <span className="font-medium">What would unblock it:</span> {limitation.unblock}
+      </p>
     )}
-  </p>
+  </>
 );
-
-const DEFAULT_WITHHELD_REASON: Partial<Record<RunStatus, string>> = {
-  Partial: 'a step failed',
-  Cancelled: 'the run was stopped',
-  Interrupted: 'the run was interrupted',
-  ObservedOnly: 'the model text did not pass verification',
-};
-
-export const withheldLine = (view: Pick<RunView, 'withheldReason'>, status: RunStatus): string =>
-  `Interpretation withheld: ${
-    view.withheldReason ?? DEFAULT_WITHHELD_REASON[status] ?? 'no interpretation is available'
-  }`;
 
 export interface AnswerCardProps {
   status: RunStatus;
   view: RunView;
   onCite?: (factId: string) => void;
+  /** A follow-up chip asks its question as a new turn. */
+  onAsk?: (followUp: FollowUp) => void;
+  /** "Open <app>": click-only, same-tab, no cohort switch. */
+  onOpenLink?: (link: OpenLink) => void;
 }
 
-/** Observed, then Interpretation and Hypotheses or the withheld line, then Limitations. */
-export const AnswerCard = ({ status, view, onCite }: AnswerCardProps) => {
+const hasModelText = (view: RunView): boolean => view.interpretation !== null && view.interpretation.length > 0;
+
+/**
+ * Every Complete answer has four labeled parts in a fixed order (FR-15, C-10): Observed,
+ * Interpretation, Hypotheses and next steps, Limitations. While Answering, Observed and
+ * Limitations show first with "Writing interpretation" (C-22); any other end state shows
+ * "Interpretation withheld: <reason>" in place of the model's two parts.
+ */
+export const AnswerCard = ({ status, view, onCite, onAsk, onOpenLink }: AnswerCardProps) => {
   const titleId = useId();
-  const facts = new Map(view.facts.map((f) => [f.id, f]));
-  const interpreted = !!view.interpretation && view.interpretation.length > 0;
+  const facts = factMap(view.facts);
+  const interpreted = hasModelText(view);
   const sentences = (items: Sentence[]) =>
-    items.map((sentence, i) => (
-      <SentenceText key={i} sentence={sentence} facts={facts} onCite={onCite} />
-    ));
+    items.map((sentence, i) => <SentenceText key={i} sentence={sentence} facts={facts} onCite={onCite} />);
+  const supersededAnswers = view.superseded.filter((s) => s.hadAnswer);
+  const followUps = view.followUps;
+  const openLinks = view.openLinks;
 
   return (
     <Card titleId={titleId} title="Answer">
+      {supersededAnswers.length > 0 && (
+        <p role="note" className="text-sm">
+          This answer replaces the version {supersededAnswers.map((s) => s.planVersion).join(', ')} answer, which an edit
+          superseded. The run record keeps it.
+        </p>
+      )}
       <div>
         <h4 className="text-sm font-semibold">Observed</h4>
-        {view.observed.length > 0 ? (
-          sentences(view.observed)
-        ) : (
-          <p className="text-sm">No tool output to report.</p>
-        )}
+        {view.observed.length > 0 ? sentences(view.observed) : <p className="text-sm">No tool output to report.</p>}
       </div>
       {interpreted ? (
         <>
@@ -94,12 +118,48 @@ export const AnswerCard = ({ status, view, onCite }: AnswerCardProps) => {
             <h4 className="text-sm font-semibold">Interpretation</h4>
             {sentences(view.interpretation ?? [])}
           </div>
-          {view.hypotheses && view.hypotheses.length > 0 && (
-            <div>
-              <h4 className="text-sm font-semibold">Hypotheses and next steps</h4>
-              {sentences(view.hypotheses)}
-            </div>
-          )}
+          <div>
+            <h4 className="text-sm font-semibold">Hypotheses and next steps</h4>
+            {sentences(view.hypotheses ?? [])}
+            {followUps.length > 0 && (
+              <ul aria-label="Follow-up questions" className="mt-2 flex flex-wrap gap-2">
+                {followUps.map((followUp) => (
+                  <li key={followUp.question}>
+                    <Button
+                      type="button"
+                      variant="default"
+                      radius="xl"
+                      size="compact-sm"
+                      disabled={!onAsk}
+                      leftSection={<LuMessageSquarePlus aria-hidden focusable="false" />}
+                      title={followUp.question}
+                      onClick={() => onAsk?.(followUp)}
+                    >
+                      {followUp.label}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {openLinks.length > 0 && (
+              <ul aria-label="Other apps" className="mt-2 flex flex-wrap gap-2">
+                {openLinks.map((link) => (
+                  <li key={link.appId}>
+                    <Button
+                      type="button"
+                      variant="subtle"
+                      size="compact-sm"
+                      disabled={!onOpenLink}
+                      rightSection={<LuExternalLink aria-hidden focusable="false" />}
+                      onClick={() => onOpenLink?.(link)}
+                    >
+                      Open {link.title}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </>
       ) : status === 'Answering' ? (
         <p className="inline-flex items-center gap-1 text-sm">
@@ -114,12 +174,14 @@ export const AnswerCard = ({ status, view, onCite }: AnswerCardProps) => {
           <h4 className="text-sm font-semibold">Limitations</h4>
           <ul className="list-disc pl-5 text-sm">
             {view.limitations.map((l, i) => (
-              <li key={`${l.code}-${i}`}>{l.text}</li>
+              <li key={`${l.code}-${i}`}>
+                <LimitationLine limitation={l} facts={facts} onCite={onCite} />
+              </li>
             ))}
           </ul>
         </div>
       )}
-      <p className="text-xs">{SYNTHETIC_NOTICE}</p>
+      <p className="text-xs">{view.notice || SYNTHETIC_NOTICE}</p>
     </Card>
   );
 };

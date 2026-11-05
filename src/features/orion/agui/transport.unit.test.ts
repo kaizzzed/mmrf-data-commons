@@ -2,7 +2,9 @@ import { readFileSync } from 'fs';
 import { createThread, threadReducer } from './reducer';
 import type { ParseResult } from './sseParser';
 import {
+  bffHandling,
   fixtureTransport,
+  httpRoutes,
   httpTransport,
   selectTransport,
   TransportError,
@@ -10,7 +12,7 @@ import {
 } from './transport';
 import type { AguiEvent, RunAgentInput } from './types';
 import { J1_STUB_STREAM } from './__fixtures__/j1Stub';
-import { FIXTURE_PATH } from '../testing';
+import { FIXTURE_PATH, readRecord, streamText, streamViews } from '../testing';
 
 const THREAD = '0123456789abcdef0123456789abcdef';
 const RUN = 'fedcba9876543210fedcba9876543210';
@@ -83,6 +85,21 @@ describe('httpTransport', () => {
     const err = await failure(collect(httpTransport({ fetchImpl: respond(response) })));
     expect(err.code).toBe('NOT_EVENT_STREAM');
     expect(err.status).toBe(status);
+  });
+
+  it.each([
+    ['INVALID_INPUT', 400, 'reject'],
+    ['SESSION_BUSY', 409, 'pollView'],
+    ['UPSTREAM_ERROR', 502, 'checkView'],
+    ['UPSTREAM_UNAVAILABLE', 503, 'reject'],
+    ['UPSTREAM_TIMEOUT', 504, 'checkView'],
+    ['UNAUTHENTICATED', 401, 'reject'],
+  ] as const)('parses a %s BffError body (HTTP %i), which the browser handles by %s', async (code, status, handling) => {
+    const body = JSON.stringify({ error: { code, message: `the BFF said ${code}` } });
+    const response = new Response(body, { status, headers: { 'Content-Type': 'application/json' } });
+    const err = await failure(collect(httpTransport({ fetchImpl: respond(response) })));
+    expect([err.code, err.status, err.bffCode, err.message]).toEqual(['BFF_ERROR', status, code, `the BFF said ${code}`]);
+    expect(bffHandling(code)).toBe(handling);
   });
 
   it('reports a failed fetch as a network error', async () => {
@@ -167,7 +184,7 @@ describe('fixtureTransport', () => {
     expect(seen[1]).toMatchObject({ code: 'RUN_NOT_FOUND' });
   });
 
-  it('ends a stopped replay Cancelled, with every unfinished step skipped', async () => {
+  it('stops a live replay the way the agent does: Stopping at once, then Cancelled', async () => {
     const transport = fixtureTransport({ delayMs: 0 });
     const abort = new AbortController();
     let thread = createThread(THREAD);
@@ -182,18 +199,64 @@ describe('fixtureTransport', () => {
     thread = threadReducer(thread, { type: 'stop', runId: RUN });
 
     const reply = await events(transport, input('cancel'));
-    expect(reply.map((e) => e.type)).toEqual(['RUN_STARTED', 'STATE_SNAPSHOT', 'RUN_FINISHED']);
+    expect(reply.map((e) => e.type)).toEqual(['RUN_STARTED', 'STATE_SNAPSHOT', 'STATE_SNAPSHOT', 'RUN_FINISHED']);
+    const [stopping, cancelled] = reply.flatMap((e) => (e.type === 'STATE_SNAPSHOT' ? [e.snapshot] : []));
+    expect([stopping.status, stopping.revision]).toEqual(['Stopping', 5]);
+    expect(stopping.steps.map((s) => s.status)).toEqual(['Done', 'Running', 'Queued', 'Queued', 'Queued']);
+    expect([cancelled.status, cancelled.revision, cancelled.pending]).toEqual(['Cancelled', 6, null]);
     thread = reply.reduce(threadReducer, thread);
     const run = thread.runs[RUN];
     expect(run.status).toBe('Cancelled');
-    expect(run.view?.revision).toBe(5);
-    expect(run.view?.steps.map((s) => [s.id, s.status])).toEqual([
-      ['s1', 'Done'],
-      ['s2', 'Skipped'],
-      ['s3', 'Skipped'],
-      ['s4', 'Skipped'],
-      ['s5', 'Skipped'],
+    expect(run.view?.revision).toBe(6);
+    expect(run.view?.steps.map((s) => [s.id, s.status, s.outputSummary])).toEqual([
+      ['s1', 'Done', expect.any(String)],
+      ['s2', 'Skipped', 'Not run: stopped'],
+      ['s3', 'Skipped', 'Not run: stopped'],
+      ['s4', 'Skipped', 'Not run: stopped'],
+      ['s5', 'Skipped', 'Not run: stopped'],
     ]);
+  });
+
+  it('cancels a waiting replay at once, with no Stopping', async () => {
+    const transport = fixtureTransport({ delayMs: 0, stream: streamText('j3-save-pause') });
+    await events(transport, input());
+    const reply = await events(transport, input('cancel'));
+    expect(reply.map((e) => e.type)).toEqual(['RUN_STARTED', 'STATE_SNAPSHOT', 'RUN_FINISHED']);
+    const [cancelled] = reply.flatMap((e) => (e.type === 'STATE_SNAPSHOT' ? [e.snapshot] : []));
+    expect([cancelled.status, cancelled.pending, cancelled.revision]).toEqual(['Cancelled', null, 11]);
+    expect(cancelled.steps.find((s) => s.id === 's8')?.status).toBe('Skipped');
+    expect(cancelled.steps.filter((s) => s.status === 'Done')).toHaveLength(7);
+  });
+
+  it('replays recorded replies to other actions under the turn\'s ids', async () => {
+    const transport = fixtureTransport({
+      delayMs: 0,
+      stream: streamText('j3-save-pause'),
+      replies: { confirm: streamText('j3-after-confirm') },
+    });
+    let thread = createThread(THREAD);
+    for (const event of await events(transport, input())) thread = threadReducer(thread, event);
+    expect(thread.runs[RUN].status).toBe('AwaitingConfirmation');
+    const confirm: RunAgentInput = {
+      ...input('cancel'),
+      forwardedProps: { orion: { action: 'confirm', nonce: 'n'.repeat(32), decision: 'dont_save', saved: [], makeActive: null } },
+    };
+    for (const event of await events(transport, confirm)) thread = threadReducer(thread, event);
+    expect(thread.runs[RUN].status).toBe('Complete');
+    expect(thread.runs[RUN].view?.revision).toBe(15);
+    expect(thread.flags).toEqual([]);
+  });
+
+  it('records a standalone viz report, and has no route behind it', async () => {
+    const transport = fixtureTransport({ delayMs: 0 });
+    const report: RunAgentInput = {
+      ...input('cancel'),
+      forwardedProps: { orion: { action: 'viz_report', vizId: 'v1', mounted: true, error: null, pinnedHashVerified: true } },
+    };
+    const seen = await events(transport, report);
+    expect(seen.map((e) => e.type)).toEqual(['RUN_STARTED', 'RUN_FINISHED']);
+    expect(seen[1]).toMatchObject({ result: { status: 'Recorded', code: null } });
+    expect(transport.routes).toBeUndefined();
   });
 
   it('answers a cancel after the replay ended with how it ended', async () => {
@@ -235,5 +298,46 @@ describe('selectTransport', () => {
     } finally {
       replaced.restore();
     }
+  });
+});
+
+describe('httpRoutes', () => {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  it("GETs the run's view and record with the thread id, never cached", async () => {
+    const view = streamViews('j1-complete').pop();
+    const record = readRecord('run-record.j1-complete.json');
+    const fetchImpl = jest.fn<Promise<Response>, Parameters<typeof fetch>>(async (url) =>
+      String(url).includes('/view') ? json(view) : json(record),
+    );
+    const routes = httpRoutes({ basePath: '/base', fetchImpl });
+    expect(await routes.view(RUN, THREAD)).toEqual(view);
+    expect(await routes.record(RUN, THREAD)).toEqual(record);
+    const [[viewUrl, init], [recordUrl]] = fetchImpl.mock.calls;
+    expect(viewUrl).toBe(`/base/api/orion/runs/${RUN}/view?threadId=${THREAD}`);
+    expect(recordUrl).toBe(`/base/api/orion/runs/${RUN}/record?threadId=${THREAD}`);
+    expect(init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'manual' });
+    expect(routes.recordDownloadHref(RUN, THREAD)).toBe(`/base/api/orion/runs/${RUN}/record?threadId=${THREAD}&download=1`);
+  });
+
+  it('says RUN_NOT_FOUND for a run the route does not store', async () => {
+    const routes = httpRoutes({
+      fetchImpl: respond(json({ error: { code: 'RUN_NOT_FOUND', message: 'no such run' } }, 404)),
+    });
+    const err = await failure(routes.view(RUN, THREAD));
+    expect([err.code, err.bffCode, err.status]).toEqual(['BFF_ERROR', 'RUN_NOT_FOUND', 404]);
+  });
+
+  it('refuses a body that is not a run view', async () => {
+    const err = await failure(httpRoutes({ fetchImpl: respond(json({ schema: 'something else' })) }).view(RUN, THREAD));
+    expect(err.code).toBe('NOT_JSON');
+  });
+
+  it('reports a redirect or an HTML page as the error it is', async () => {
+    const err = await failure(
+      httpRoutes({ fetchImpl: respond(new Response('<html></html>', { status: 500, headers: { 'Content-Type': 'text/html' } })) }).record(RUN, THREAD),
+    );
+    expect([err.code, err.status, err.bffCode]).toEqual(['NOT_JSON', 500, null]);
   });
 });
