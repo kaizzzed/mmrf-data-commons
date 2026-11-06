@@ -863,7 +863,11 @@ describe('BFF errors as the transport parses them', () => {
     mockIds.push('de'.repeat(16), ids.runId);
     renderApp(bff);
     await ask('Compare survival by CGS risk');
-    expect(await screen.findByText('Your session has ended, so no run started. Sign in again, then ask again.')).toBeInTheDocument();
+    const notice = 'Your session has ended, so no run started. Sign in again, then ask again.';
+    // Shown in the conversation and said in the live region: two elements carry the words, and
+    // which of them a render shows first is timing, so each is looked for where it belongs.
+    expect(await within(screen.getByRole('log', { name: 'Conversation' })).findByText(notice)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(notice));
     await waitFor(() => expect(composer()).toHaveValue('Compare survival by CGS risk'));
     expect(screen.queryByRole('article', { name: 'Compare survival by CGS risk' })).toBeNull();
   });

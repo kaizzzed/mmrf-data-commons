@@ -2,8 +2,9 @@ import { activeRunId, type ThreadAction } from '../agui/reducer';
 import type { ParseResult } from '../agui/sseParser';
 import { TransportError, type RunRoutes, type RunTransport } from '../agui/transport';
 import type { AguiEvent, CohortContext, RunAgentInput, RunView, VizReport } from '../agui/types';
-import { createTab, tabReducer, type TabAction, type TabState } from '../state/tab';
-import { streamViews } from '../testing';
+import { dontSaveAction } from '../cohort/saveCohorts';
+import { createTab, tabReducer, threadInFlight, type TabAction, type TabState } from '../state/tab';
+import { replayStream, streamViews } from '../testing';
 import {
   BUSY_POLL_LIMIT_MS,
   BUSY_POLL_MS,
@@ -16,6 +17,7 @@ import {
 } from './runController';
 
 const THREAD = '0123456789abcdef0123456789abcdef';
+const OTHER_THREAD = '89abcdef0123456789abcdef01234567';
 const RUN = 'fedcba9876543210fedcba9876543210';
 const COHORT: CohortContext = {
   active: { id: null, name: 'All cases', filters: { mode: 'and', root: {} }, caseCount: 1000 },
@@ -635,5 +637,209 @@ describe('createRunController: a turn that takes over during SESSION_BUSY pollin
     expect(threadActions().some((a) => a.type === 'turnRejected')).toBe(true);
     await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 3);
     expect(threadActions().at(-1)).toEqual({ type: 'view', view: { ...J1_DONE, threadId: THREAD, runId: RUN } });
+  });
+});
+
+describe('createRunController: a thread deleted from the tab (release)', () => {
+  const OTHER = 'abcdef0123456789abcdef0123456789';
+
+  it('stops following its run: no more view reads, nothing dispatched', async () => {
+    const executing = { ...J1_EXECUTING, threadId: THREAD, runId: RUN };
+    const { controller, routes, threadActions } = setup(() => ok({} as RunAgentInput), [executing]);
+    controller.restore(THREAD, [RUN], RUN);
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
+    const reads = routes.view.mock.calls.length;
+    const seen = threadActions().length;
+    expect(reads).toBe(2);
+    controller.release(THREAD);
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 5);
+    expect(routes.view).toHaveBeenCalledTimes(reads);
+    expect(threadActions()).toHaveLength(seen);
+  });
+
+  it('starts no follower for a restore whose read answers after the release', async () => {
+    const executing = { ...J1_EXECUTING, threadId: THREAD, runId: RUN };
+    const { controller, routes, dispatch } = setup(() => ok({} as RunAgentInput), [executing]);
+    controller.restore(THREAD, [RUN], RUN);
+    controller.release(THREAD);
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 5);
+    expect(routes.view).toHaveBeenCalledTimes(1);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('sends the reports still queued for its runs at once, standalone, and arms no timer for them', async () => {
+    const { controller, turns } = setup((input) => ok(input, 'Recorded'));
+    controller.reportViz(THREAD, report('v1'));
+    controller.release(THREAD);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(turns.map((t) => [t.threadId, t.forwardedProps.orion])).toEqual([
+      [THREAD, { action: 'viz_report', vizId: 'v1', mounted: true, error: null, pinnedHashVerified: true }],
+    ]);
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS * 5);
+    expect(turns).toHaveLength(1);
+  });
+
+  it('drops a report that fails after the release instead of keeping it for a turn that never comes', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { controller, turns } = setup((input) =>
+        input.forwardedProps.orion.action === 'viz_report' ? new TransportError('NETWORK', 'offline') : ok(input),
+      );
+      controller.reportViz(THREAD, report('v1'));
+      controller.release(THREAD);
+      await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS * 5);
+      expect(actionsOf(turns)).toEqual(['viz_report']);
+      controller.ask(THREAD, 'q', COHORT);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(actionsOf(turns)).toEqual(['viz_report']);
+      expect(warn).toHaveBeenCalledWith('[orion] viz reports of a deleted thread not recorded', ['v1']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ignores every later call for the thread, and keeps serving the others', async () => {
+    const { controller, turns, dispatch, routes } = setup((input) => ok(input));
+    controller.release(THREAD);
+    controller.warmup(THREAD);
+    controller.ask(THREAD, 'q', COHORT);
+    controller.stop(THREAD, RUN);
+    controller.resendStop(THREAD, RUN);
+    controller.resume(THREAD, RUN, { action: 'retry_step', stepId: 's1' }, { status: 'Partial', nonce: null });
+    controller.reportViz(THREAD, report('v1'));
+    controller.restore(THREAD, [RUN], RUN);
+    expect(await controller.loadSpec(THREAD, RUN, 'v1')).toBeNull();
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS * 2);
+    expect(turns).toEqual([]);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(routes.view).not.toHaveBeenCalled();
+
+    controller.ask(OTHER, 'q', COHORT);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(turns.map((t) => [t.threadId, t.forwardedProps.orion.action])).toEqual([[OTHER, 'ask']]);
+  });
+
+  it('forgets the specs it cached for the thread', async () => {
+    const done = { ...J1_DONE, threadId: THREAD, runId: RUN };
+    const { controller, routes } = setup(() => ok({} as RunAgentInput), [done]);
+    expect(await controller.loadSpec(THREAD, RUN, 'v1')).toEqual(done.vizSpecs[0]);
+    controller.release(THREAD);
+    expect(await controller.loadSpec(THREAD, RUN, 'v1')).toBeNull();
+    expect(routes.view).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createRunController: busy threads (what deleting a thread would cut off)', () => {
+  /** A transport whose warm-up stays open until `release`; every other turn completes. */
+  const gatedWarmup = () => {
+    let release: () => void = () => undefined;
+    const warmupOpen = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const turns: RunAgentInput[] = [];
+    const transport: RunTransport = {
+      async *run(input): AsyncGenerator<ParseResult> {
+        turns.push(input);
+        if (input.forwardedProps.orion.action === 'warmup') await warmupOpen;
+        for (const event of ok(input)) yield { kind: 'event', event };
+      },
+    };
+    return { transport, turns, release: () => release() };
+  };
+
+  const RETRY = { action: 'retry_step', stepId: 's1' } as const;
+  const PARTIAL = { status: 'Partial', nonce: null } as const;
+
+  it('holds a resume queued behind the warm-up from the call on, while the thread shows no invocation, until it settles', async () => {
+    const { transport, turns, release } = gatedWarmup();
+    const { controller, thread } = withReducer(transport);
+    const heard = jest.fn();
+    const unsubscribe = controller.subscribe(heard);
+    controller.warmup(THREAD);
+    await jest.advanceTimersByTimeAsync(0);
+    // A warm-up alone holds nothing a delete would lose.
+    expect(controller.busyThreads().size).toBe(0);
+    expect(heard).not.toHaveBeenCalled();
+
+    controller.resume(THREAD, RUN, RETRY, PARTIAL);
+    expect(controller.busyThreads()).toEqual(new Set([THREAD]));
+    expect(heard).toHaveBeenCalledTimes(1);
+    const snapshot = controller.busyThreads();
+    await jest.advanceTimersByTimeAsync(QUEUE_WAIT_MS / 2);
+    expect(actionsOf(turns)).toEqual(['warmup']);
+    expect(thread().invocation).toBeNull();
+    // The same Set while nothing changes, so state holding it does not render again.
+    expect(controller.busyThreads()).toBe(snapshot);
+
+    release();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(actionsOf(turns)).toEqual(['warmup', 'retry_step']);
+    expect(controller.busyThreads().size).toBe(0);
+    expect(heard).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    controller.resume(THREAD, RUN, RETRY, PARTIAL);
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets go of a queued turn that a newer one replaced before it left, and of the newer one once it settles', async () => {
+    const { transport, turns, release } = gatedWarmup();
+    const controller = createRunController(transport, jest.fn());
+    controller.warmup(THREAD);
+    controller.resume(THREAD, RUN, RETRY, PARTIAL);
+    controller.stop(THREAD, RUN);
+    expect(controller.busyThreads().has(THREAD)).toBe(true);
+    release();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(actionsOf(turns)).toEqual(['warmup', 'cancel']);
+    expect(controller.busyThreads().has(THREAD)).toBe(false);
+  });
+
+  it('holds a failed resume while the view route is checked for its fate, though the thread shows nothing in flight', async () => {
+    const paused = replayStream('j3-save-pause');
+    const [threadId, runId] = [paused.threadId, paused.runIds[0]];
+    const nonce = (J3_PAUSE.pending as { nonce: string }).nonce;
+    let reads = 0;
+    const view = jest.fn(async () => {
+      reads += 1;
+      if (reads <= 3) throw offline();
+      return J3_PAUSE;
+    });
+    const { transport } = droppedAsk(() => [], viewRoutes(view));
+    let tab: TabState = { ...createTab(threadId), threads: { [threadId]: paused } };
+    const controller = createRunController(transport, (action: TabAction) => {
+      tab = tabReducer(tab, action);
+    });
+    controller.resume(threadId, runId, dontSaveAction(nonce), { status: 'AwaitingConfirmation', nonce });
+    await jest.advanceTimersByTimeAsync(0);
+    const shown = tab.threads[threadId];
+    expect(shown.invocation?.closed).toBe(true);
+    expect(shown.runs[runId].status).toBe('AwaitingConfirmation');
+    expect(threadInFlight(shown)).toBe(false);
+    expect(activeRunId(shown)).toBeNull();
+    expect(controller.busyThreads().has(threadId)).toBe(true);
+
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS * 2);
+    expect(view).toHaveBeenCalledTimes(3);
+    expect(controller.busyThreads().has(threadId)).toBe(true);
+    // The record answers: the confirm never landed, the run still waits. Nothing is held now.
+    await jest.advanceTimersByTimeAsync(FOLLOW_POLL_MS);
+    expect(view).toHaveBeenCalledTimes(4);
+    expect(controller.busyThreads().has(threadId)).toBe(false);
+  });
+
+  it('holds nothing for a standalone viz report, and nothing once disposed', async () => {
+    const { controller, turns } = setup((input) => (input.forwardedProps.orion.action === 'viz_report' ? 'hang' : ok(input)));
+    controller.reportViz(THREAD, report('v1'));
+    await jest.advanceTimersByTimeAsync(VIZ_REPORT_IDLE_MS);
+    expect(actionsOf(turns)).toEqual(['viz_report']);
+    expect(controller.busyThreads().size).toBe(0);
+
+    const executing = { ...J1_EXECUTING, threadId: OTHER_THREAD, runId: RUN };
+    const following = setup(() => ok({} as RunAgentInput), [executing]);
+    following.controller.restore(OTHER_THREAD, [RUN], RUN);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(following.controller.busyThreads().has(OTHER_THREAD)).toBe(true);
+    following.controller.dispose();
+    expect(following.controller.busyThreads().size).toBe(0);
   });
 });

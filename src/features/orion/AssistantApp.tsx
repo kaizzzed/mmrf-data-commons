@@ -1,6 +1,7 @@
 import React, {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -39,7 +40,12 @@ import { Starters } from './components/Starters';
 import { ThreadList } from './components/ThreadList';
 import { ThreadView } from './components/ThreadView';
 import { FIXTURE_NOTICE, MAX_QUESTION_CHARS, SYNTHETIC_NOTICE } from './constants';
-import { useRunController, type ResumeAction, type ResumeExpectation } from './controller/useRunController';
+import {
+  useBusyThreads,
+  useRunController,
+  type ResumeAction,
+  type ResumeExpectation,
+} from './controller/useRunController';
 import { formatScope } from './format';
 import { handoffFor, openInTool, scopeHandoff, type Handoff } from './handoff/handoff';
 import { mantineNotifier, type Notifier } from './handoff/notifier';
@@ -48,19 +54,26 @@ import { EvidenceInspector, type InspectorTarget } from './inspector/EvidenceIns
 import { noticeText } from './notices';
 import { describeRunChange } from './state/announce';
 import { loadTab, saveTab } from './state/storage';
-import { activeThread, createTab, tabReducer, threadRuns, type TabState } from './state/tab';
+import { activeThread, createTab, tabReducer, threadInFlight, threadRuns, type TabState } from './state/tab';
 import { citedCallLoader, DEFAULT_VIZ_SERVICES, VizServicesContext, type VizServices } from './viz/vizServices';
 
 // Day 1 spike only (`spike=pp` with NEXT_PUBLIC_ORION_SPIKE=1); loads ProteinPaint just for that page.
 const PpSpike = lazy(() => import('./viz/spike/PpSpike'));
 
+/** What the live region says; `seq` tells a repeat (a second "Thread deleted") from no change. */
+interface Announcement {
+  text: string;
+  seq: number;
+}
+
 /**
- * Polite announcements for the thread on screen: run changes and rejection notices.
- * Switching threads says nothing.
+ * Polite announcements for the thread on screen: run changes and rejection notices, plus what
+ * `announce` is given (a deleted thread). Switching threads says nothing.
  */
-const useRunAnnouncements = (thread: ThreadState): string => {
+const useAnnouncements = (thread: ThreadState): [Announcement, (text: string) => void] => {
   const previous = useRef(thread);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState<Announcement>({ text: '', seq: 0 });
+  const announce = useCallback((text: string) => setMessage(({ seq }) => ({ text, seq: seq + 1 })), []);
   useEffect(() => {
     const prev = previous.current;
     previous.current = thread;
@@ -70,10 +83,15 @@ const useRunAnnouncements = (thread: ThreadState): string => {
       .map((id) => describeRunChange(prev.runs[id], thread.runs[id]))
       .filter((part): part is string => part !== null);
     if (thread.notice && thread.notice !== prev.notice) parts.push(noticeText(thread.notice));
-    if (parts.length > 0) setMessage(parts.join(' '));
-  }, [thread]);
-  return message;
+    if (parts.length > 0) announce(parts.join(' '));
+  }, [thread, announce]);
+  return [message, announce];
 };
+
+const THREAD_DELETED = 'Thread deleted';
+// Said as a state, not an order: the reason shows only where the delete control is.
+const RUN_IN_PROGRESS = "Can't delete while a run is in progress";
+const SAVE_IN_PROGRESS = "Can't delete while cohorts are being saved";
 
 /**
  * Puts a rejected question back in the composer once, when its thread is on screen, unless
@@ -162,6 +180,7 @@ const AssistantMain = ({
   // Restored synchronously, so strict mode's double effects cannot clobber it.
   const [tab, dispatch] = useReducer(tabReducer, null, () => loadTab() ?? createTab(newId()));
   const controller = useRunController(transport, dispatch);
+  const busyThreads = useBusyThreads(controller);
   const cohortContext = useCohortContext();
   const storePort = useCohortPort();
   const port = cohorts ?? storePort;
@@ -190,7 +209,7 @@ const AssistantMain = ({
   /** A cancel turn for the run is on its way: Stop waits. When that turn failed, Stop can go again. */
   const cancelInFlight = busyRunId !== null && busyRunId === stopRunId && thread.invocation?.kind === 'cancel';
   const stopping = running && cancelInFlight;
-  const announcement = useRunAnnouncements(thread);
+  const [announcement, announce] = useAnnouncements(thread);
   useRestoreRejectedQuestion(tab, setDraft);
   const { active } = cohortContext;
   // The prompt asks about a run that waits. Once that run has moved on (answered on its card,
@@ -333,6 +352,50 @@ const AssistantMain = ({
     else composerRef.current?.focus();
   };
 
+  /**
+   * Why a thread cannot be deleted yet, or null. A run in flight, or a turn the controller still
+   * holds (queued behind a warm-up, or a failed resume it is checking), would be cut off; a Create
+   * still reading definitions would save, then confirm into nothing.
+   */
+  const deleteBlocked = (candidate: ThreadState, busy: ReadonlySet<string> = busyThreads): string | null => {
+    if (threadInFlight(candidate) || busy.has(candidate.threadId)) return RUN_IN_PROGRESS;
+    const saving = threadRuns(candidate).some((run) => {
+      const pending = run.view?.pending;
+      return pending?.kind === 'confirm' && !!saves[pending.nonce]?.saving;
+    });
+    return saving ? SAVE_IN_PROGRESS : null;
+  };
+
+  /**
+   * Asks the tab to drop the thread; the server keeps its runs, the platform its cohorts. `tab` is
+   * this render's, so the controller is asked as of now and the reducer, on the latest state, has
+   * the last word: the controller lets the thread go only once the tab has (below).
+   */
+  const deleteThread = (id: string) => {
+    const doomed = tab.threads[id];
+    if (!doomed || deleteBlocked(doomed, controller.busyThreads())) return;
+    if (id === threadId) {
+      setInspector(null);
+      setPause(null);
+    }
+    dispatch({ type: 'deleteThread', threadId: id, freshThreadId: newId() });
+  };
+
+  // A thread leaves the controller only once it has left the tab: a delete the reducer refused
+  // (a run started on it meanwhile) keeps the thread, its turns and its Stop working.
+  const listed = useRef(tab.threadIds);
+  useEffect(() => {
+    const before = listed.current;
+    listed.current = tab.threadIds;
+    const gone = before.filter((id) => !tab.threadIds.includes(id));
+    if (gone.length === 0) return;
+    for (const id of gone) {
+      controller.release(id);
+      restored.current.delete(id);
+    }
+    announce(THREAD_DELETED);
+  }, [controller, tab.threadIds, announce]);
+
   const switchScope = (option: ScopeChipOption) => {
     try {
       const outcome = setActiveCohort(
@@ -429,6 +492,8 @@ const AssistantMain = ({
                 setPause(null);
                 composerRef.current?.focus();
               }}
+              onDelete={deleteThread}
+              deleteBlocked={deleteBlocked}
             />
           </aside>
           <section aria-labelledby={titleId} className="flex min-w-0 flex-1 flex-col gap-4">
@@ -449,7 +514,8 @@ const AssistantMain = ({
             {runs.length === 0 && <Starters onPick={(prompt) => send(prompt, false)} />}
             <ThreadView runs={runs} running={running} onStop={stop} notice={thread.notice} />
             <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-              {announcement}
+              {/* A new node each time, so the same words said twice are announced twice. */}
+              <span key={announcement.seq}>{announcement.text}</span>
             </div>
             {/* Shown only while its run still waits and no turn is in flight, so the click cancels that run. */}
             {pause && !pauseStale && (
