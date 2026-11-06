@@ -43,6 +43,17 @@
       "label": "Analysis Tools",
       "tools": [
         {
+          "title": "ORION Assistant",
+          "type": "application",
+          "hasDemo": false,
+          "loginRequired": false,
+          "description": "Ask a question in plain language. ORION shows its plan, runs the platform's own tools and separates what they returned from what it might mean.",
+          "icon": "/icons/apps/AnalysisCenter.svg",
+          "appId": "Assistant",
+          "hideCounts": true,
+          "countUnits": "Cases"
+        },
+        {
           "title": "Mutation Frequency",
           "type": "application",
           "hasDemo": false,
