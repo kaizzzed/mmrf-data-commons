@@ -1,5 +1,7 @@
 import {
   createThread,
+  isInvocationActive,
+  isLeasedStatus,
   threadReducer,
   type RunState,
   type ThreadAction,
@@ -17,6 +19,13 @@ export interface TabState {
 export type TabAction =
   | { type: 'newThread'; threadId: string }
   | { type: 'selectThread'; threadId: string }
+  /**
+   * Removes a thread from this tab (the server keeps its run records). The active one hands over
+   * to the next thread in the list, else the previous one; the last one to a fresh empty thread
+   * under `freshThreadId`, so the tab is never empty. A thread with a run in flight stays, and so
+   * does the tab's only thread while it has no runs (`nothingToDelete`).
+   */
+  | { type: 'deleteThread'; threadId: string; freshThreadId: string }
   | { type: 'thread'; threadId: string; action: ThreadAction };
 
 export const createTab = (threadId: string): TabState => ({
@@ -40,6 +49,22 @@ export const tabReducer = (state: TabState, action: TabAction): TabState => {
       return state.threads[action.threadId]
         ? { ...state, activeThreadId: action.threadId }
         : state;
+    case 'deleteThread': {
+      const thread = state.threads[action.threadId];
+      if (!thread || threadInFlight(thread) || nothingToDelete(state.threadIds.length, thread)) return state;
+      const index = state.threadIds.indexOf(action.threadId);
+      const threadIds = state.threadIds.filter((id) => id !== action.threadId);
+      const threads = { ...state.threads };
+      delete threads[action.threadId];
+      if (threadIds.length === 0) {
+        return action.freshThreadId === action.threadId ? state : createTab(action.freshThreadId);
+      }
+      const activeThreadId =
+        state.activeThreadId === action.threadId
+          ? (threadIds[index] ?? threadIds[index - 1] ?? threadIds[0])
+          : state.activeThreadId;
+      return { ...state, activeThreadId, threadIds, threads };
+    }
     case 'thread': {
       const thread = state.threads[action.threadId];
       if (!thread) return state;
@@ -61,3 +86,21 @@ export const threadRuns = (thread: ThreadState): RunState[] =>
 
 export const threadTitle = (thread: ThreadState): string =>
   threadRuns(thread)[0]?.question || 'New thread';
+
+/**
+ * A run of the thread is in flight as the thread shows it: its invocation is open (an ask or a
+ * Stop from the click on, any other turn from when it leaves the browser), or a run holds a lease
+ * (planning, executing, answering, or stopping while its cancel waits to be confirmed or sent
+ * again). Deleting such a thread would leave that stream or follower behind, so it waits. What the
+ * thread cannot show (a resume still queued, a failed resume being checked) the controller's
+ * busyThreads() answers.
+ */
+export const threadInFlight = (thread: ThreadState): boolean =>
+  isInvocationActive(thread) || threadRuns(thread).some((run) => isLeasedStatus(run.status));
+
+/**
+ * The tab's only thread, with no runs: deleting it would only swap it for an identical fresh one
+ * (and warm that one up), as New thread declines to stack empty threads. It offers no delete.
+ */
+export const nothingToDelete = (threadCount: number, thread: ThreadState): boolean =>
+  threadCount === 1 && thread.runIds.length === 0;

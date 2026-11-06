@@ -3,7 +3,7 @@ import type { ParseResult } from '../agui/sseParser';
 import { fixtureTransport, type RunTransport } from '../agui/transport';
 import type { AguiEvent, CohortContext, RunAgentInput } from '../agui/types';
 import type { TabAction } from '../state/tab';
-import { useRunController } from './useRunController';
+import { useBusyThreads, useRunController } from './useRunController';
 
 const THREAD = '0123456789abcdef0123456789abcdef';
 const COHORT: CohortContext = {
@@ -136,5 +136,32 @@ describe('useRunController', () => {
       await jest.advanceTimersByTimeAsync(20_000);
     });
     expect(sent).toEqual(['warmup']);
+  });
+});
+
+describe('useBusyThreads', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('renders the threads the controller holds a turn for, from the call until the turn has settled', async () => {
+    const { transport, sent, release } = slowWarmup();
+    const dispatch = jest.fn<void, [TabAction]>();
+    const { result } = renderHook(() => {
+      const controller = useRunController(transport, dispatch);
+      return { controller, busy: useBusyThreads(controller) };
+    });
+    expect(result.current.busy.size).toBe(0);
+    act(() => result.current.controller.warmup(THREAD));
+    expect(result.current.busy.size).toBe(0);
+    act(() => {
+      result.current.controller.ask(THREAD, 'q', COHORT);
+    });
+    expect([...result.current.busy]).toEqual([THREAD]);
+    await act(async () => {
+      release();
+      await jest.advanceTimersByTimeAsync(5_000);
+    });
+    expect(sent).toEqual(['warmup', 'ask']);
+    expect(result.current.busy.size).toBe(0);
   });
 });

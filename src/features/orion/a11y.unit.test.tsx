@@ -208,3 +208,65 @@ describe('the Assistant page', () => {
     },
   );
 });
+
+describe('deleting a thread', () => {
+  const threadList = () => screen.getByRole('navigation', { name: 'Threads in this tab' });
+
+  it('the list and its confirmation: no axe violation, named controls, no default button, focus held and given back', async () => {
+    const { container } = renderApp(replay('j1-complete').transport);
+    await userEvent.type(composer(), 'J1{Enter}');
+    await screen.findByRole('region', { name: 'Answer' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument());
+    const trigger = within(threadList()).getByRole('button', { name: 'Delete thread: J1' });
+    expect(await axeViolations(threadList())).toEqual([]);
+    expect(defaultButtons(threadList())).toEqual([]);
+
+    await userEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: 'Delete this thread?' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    // Exactly the copy: the buttons are outside the dialog's body, so they are not read as part of it.
+    expect(dialog).toHaveAccessibleDescription(
+      "“J1” will be removed from this tab. This can't be undone. Cohorts you saved and the run records on the server are not affected.",
+    );
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus());
+    expect(await axeViolations(dialog)).toEqual([]);
+    expect(defaultButtons(dialog)).toEqual([]);
+    expect(skipsALevel(headingLevels(dialog), 1)).toBe(false);
+    // Tab stays inside the dialog.
+    await userEvent.tab();
+    expect(within(dialog).getByRole('button', { name: 'Delete' })).toHaveFocus();
+    await userEvent.tab();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(trigger).toHaveFocus();
+    expect(await axeViolations(container)).toEqual([]);
+  });
+
+  it('a thread whose run is in flight: the control is off but focusable, says why on focus, and axe accepts it', async () => {
+    // An ask that streams its start and then nothing until it is aborted.
+    const transport: RunTransport = {
+      replay: true,
+      async *run(input, signal) {
+        if (input.forwardedProps.orion.action !== 'ask') return;
+        yield { kind: 'event', event: { type: 'RUN_STARTED', threadId: input.threadId, runId: input.runId } };
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+      },
+    };
+    renderApp(transport);
+    await userEvent.type(composer(), 'q{Enter}');
+    await screen.findByRole('button', { name: 'Stop' });
+    const control = within(threadList()).getByRole('button', { name: 'Delete thread: q' });
+    expect(control).toHaveAttribute('aria-disabled', 'true');
+    expect(control).toHaveAccessibleDescription("Can't delete while a run is in progress");
+    expect(await axeViolations(threadList())).toEqual([]);
+    act(() => control.focus());
+    expect(await screen.findByRole('tooltip')).toHaveTextContent("Can't delete while a run is in progress");
+    expect(await axeViolations(threadList())).toEqual([]);
+    // Content shown on focus can be dismissed without moving focus (WCAG 1.4.13).
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
+    expect(control).toHaveFocus();
+  });
+});

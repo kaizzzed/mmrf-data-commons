@@ -115,6 +115,20 @@ docker build .
 docker build --build-arg NEXT_PUBLIC_SYNTHETIC_SANDBOX=1 .
 ```
 
+## ORION Assistant
+
+ORION is an assistant for the synthetic sandbox. It turns a plain-language question into a
+visible plan, runs the site's own tools, shows the results with every number cited, and asks
+before saving cohorts. It opens from **Assistant** in the top navigation (`/?app=Assistant`).
+The UI is in `src/features/orion` and the BFF routes are in `src/pages/api/orion`. It needs the
+ORION agent, which lives in the sandbox repository: see
+[ORION_QUICKSTART.md](https://github.com/kaizzzed/mmrf-virtual-lab-sandbox/blob/main/ORION_QUICKSTART.md)
+to run both. Run its tests with:
+
+```bash
+NODE_OPTIONS=--no-experimental-strip-types npx jest src/features/orion src/pages/api/orion
+```
+
 ## CI and deployment
 
 AWS CodePipeline and CodeBuild handle the deployment image build and storage in

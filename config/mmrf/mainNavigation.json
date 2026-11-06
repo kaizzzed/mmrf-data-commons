@@ -14,6 +14,11 @@
         "name": "Analysis Center"
       },
       {
+        "icon": "/icons/apps/AnalysisCenter.svg",
+        "href": "/?app=Assistant",
+        "name": "Assistant"
+      },
+      {
         "icon": "/icons/apps/Projects.svg",
         "href": "/?app=Projects",
         "name": "Projects"

@@ -64,6 +64,23 @@ export interface RunController {
   /** A viz spec with its pinned inputs, from the untrimmed view route; null when it has none. */
   loadSpec(threadId: string, runId: string, vizId: string): Promise<VizSpec | null>;
   readonly routes: RunRoutes | null;
+  /**
+   * The thread was deleted from the tab: what the controller keeps for it goes (its follower, its
+   * warm-up mark, its timers and cached specs), viz reports still queued for its runs go out now,
+   * standalone, since the run records outlive the thread, and every later call for it does nothing.
+   * Only for a thread the tab has dropped, which it does only with nothing in flight (threadInFlight)
+   * and nothing busy here (busyThreads); a stream still open is aborted, not cancelled.
+   */
+  release(threadId: string): void;
+  /**
+   * The threads a delete would cut work off for: a turn queued or on its way (a resume waiting
+   * behind a warm-up, whose invocation the thread does not show yet, included), or a run followed
+   * through the view route (a failed resume whose fate is not known yet included). Warm-ups and
+   * standalone viz reports do not count. The same Set until it changes (useBusyThreads).
+   */
+  busyThreads(): ReadonlySet<string>;
+  /** Calls `listener` whenever busyThreads() changes; returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
   /** Aborts every stream and timer and drops later events, until `activate` (strict mode remounts). */
   dispose(): void;
   activate(): void;
@@ -170,15 +187,42 @@ export const createRunController = (
   const specs = new Map<string, Promise<VizSpec | null>>();
   /** Turns that must not be aborted by the thread's next turn (a resent Stop queued ahead of it). */
   const detached = new Set<AbortController>();
+  /** Threads deleted from the tab: nothing more is sent, followed or dispatched for them. */
+  const released = new Set<string>();
+  /** Per thread, the turns queued or on their way (sendTurn), until each has settled or been skipped. */
+  const pendingTurns = new Map<string, number>();
+  const listeners = new Set<() => void>();
+  let busy: ReadonlySet<string> = new Set<string>();
   let disposed = false;
 
+  /** busyThreads() is a new Set only when its members change, and listeners hear of that only. */
+  const refreshBusy = (): void => {
+    const next = new Set([...pendingTurns.keys(), ...followers.keys()]);
+    if (next.size === busy.size && [...next].every((id) => busy.has(id))) return;
+    busy = next;
+    for (const listener of [...listeners]) listener();
+  };
+
+  const holdTurn = (threadId: string): void => {
+    pendingTurns.set(threadId, (pendingTurns.get(threadId) ?? 0) + 1);
+    refreshBusy();
+  };
+
+  const dropTurn = (threadId: string): void => {
+    const left = (pendingTurns.get(threadId) ?? 1) - 1;
+    if (left > 0) pendingTurns.set(threadId, left);
+    else pendingTurns.delete(threadId);
+    refreshBusy();
+  };
+
   const toThread = (threadId: string, action: ThreadAction): void => {
-    if (!disposed) dispatch({ type: 'thread', threadId, action });
+    if (!disposed && !released.has(threadId)) dispatch({ type: 'thread', threadId, action });
   };
 
   const stopFollowing = (threadId: string): void => {
     followers.get(threadId)?.abort();
     followers.delete(threadId);
+    refreshBusy();
   };
 
   const begin = (threadId: string): AbortController => {
@@ -194,22 +238,26 @@ export const createRunController = (
     const open = inflight.get(threadId) ?? new Set<Promise<void>>();
     inflight.set(threadId, open);
     open.add(invocation);
-    void invocation.then(
-      () => open.delete(invocation),
-      (err: unknown) => {
-        open.delete(invocation);
-        console.warn('[orion] turn ended with an error', err);
-      },
-    );
+    const settle = () => {
+      open.delete(invocation);
+      // A deleted thread's last invocation leaves nothing behind.
+      if (open.size === 0 && released.has(threadId) && inflight.get(threadId) === open) inflight.delete(threadId);
+    };
+    void invocation.then(settle, (err: unknown) => {
+      settle();
+      console.warn('[orion] turn ended with an error', err);
+    });
   };
 
   /** Settles once every open invocation of the thread has, however each ended. */
   const openSettled = (threadId: string): Promise<void> =>
     Promise.allSettled([...(inflight.get(threadId) ?? [])]).then(() => undefined);
 
-  /** Runs `send` once the thread's open invocations settle, and tracks it as open. */
-  const enqueue = (threadId: string, send: () => Promise<void> | void): void => {
-    track(threadId, settleWithin(openSettled(threadId), QUEUE_WAIT_MS).then(send));
+  /** Runs `send` once the thread's open invocations settle, and tracks it as open until it settles. */
+  const enqueue = (threadId: string, send: () => Promise<void> | void): Promise<void> => {
+    const invocation = settleWithin(openSettled(threadId), QUEUE_WAIT_MS).then(send);
+    track(threadId, invocation);
+    return invocation;
   };
 
   // ------------------------------------------------------------ viz reports
@@ -223,6 +271,11 @@ export const createRunController = (
   /** Reports a turned-away turn carried go back to the front; a newer report of a viz wins. */
   const requeue = (threadId: string, reports: VizReport[]): void => {
     if (reports.length === 0) return;
+    if (released.has(threadId)) {
+      // No next turn will come for a deleted thread.
+      console.warn('[orion] viz reports of a deleted thread not recorded', reports.map((r) => r.vizId));
+      return;
+    }
     const queue = vizQueue.get(threadId) ?? [];
     const newer = (r: VizReport) => queue.some((q) => q.runId === r.runId && q.vizId === r.vizId);
     vizQueue.set(threadId, [...reports.filter((r) => !newer(r)), ...queue]);
@@ -269,7 +322,7 @@ export const createRunController = (
    * the thread's next turn.
    */
   const rearmReports = (threadId: string): void => {
-    if (disposed || vizTimers.has(threadId) || (vizQueue.get(threadId)?.length ?? 0) === 0) return;
+    if (disposed || released.has(threadId) || vizTimers.has(threadId) || (vizQueue.get(threadId)?.length ?? 0) === 0) return;
     armReports(threadId);
   };
 
@@ -282,10 +335,11 @@ export const createRunController = (
    * answers before the limit, its transport failure stands.
    */
   const follow = (threadId: string, runId: string, lost?: UnsettledTurn): void => {
-    if (!routes || disposed) return;
+    if (!routes || disposed || released.has(threadId)) return;
     stopFollowing(threadId);
     const controller = new AbortController();
     followers.set(threadId, controller);
+    refreshBusy();
     const deadline = Date.now() + FOLLOW_LIMIT_MS;
     let unsettled = lost ?? null;
     void (async () => {
@@ -323,7 +377,10 @@ export const createRunController = (
       } catch (err) {
         if (!(err instanceof Aborted)) throw err;
       } finally {
-        if (followers.get(threadId) === controller) followers.delete(threadId);
+        if (followers.get(threadId) === controller) {
+          followers.delete(threadId);
+          refreshBusy();
+        }
       }
     })();
   };
@@ -513,9 +570,11 @@ export const createRunController = (
     controller: AbortController,
     options: { question?: string; expect?: ResumeExpectation | null; onSend?: () => void } = {},
   ): void => {
-    enqueue(threadId, () => {
+    // Busy from the click: a turn waiting for the warm-up has no invocation on the thread yet.
+    holdTurn(threadId);
+    const turn = enqueue(threadId, () => {
       options.onSend?.();
-      if (controller.signal.aborted || disposed) return undefined;
+      if (controller.signal.aborted || disposed || released.has(threadId)) return undefined;
       const reports = takeReports(threadId);
       const action: OrionAction = reports.length > 0 ? { ...orion, vizReports: reports } : orion;
       const ctx: TurnContext = {
@@ -532,12 +591,14 @@ export const createRunController = (
         rearmReports(threadId);
       });
     });
+    const settled = () => dropTurn(threadId);
+    void turn.then(settled, settled);
   };
 
   return {
     routes,
     warmup(threadId) {
-      if (warmed.has(threadId)) return;
+      if (warmed.has(threadId) || released.has(threadId)) return;
       warmed.add(threadId);
       const input = buildInput(threadId, newId(), { action: 'warmup' });
       enqueue(threadId, () =>
@@ -550,6 +611,7 @@ export const createRunController = (
     },
     ask(threadId, question, cohortContext, options = {}) {
       const runId = newId();
+      if (released.has(threadId)) return runId;
       toThread(threadId, { type: 'submit', runId, question, at: new Date().toISOString() });
       const controller = begin(threadId);
       unsent.set(threadId, runId);
@@ -568,6 +630,7 @@ export const createRunController = (
       return runId;
     },
     stop(threadId, runId) {
+      if (released.has(threadId)) return;
       if (unsent.get(threadId) === runId) {
         // The server never saw this run, so a cancel turn would only get RUN_NOT_FOUND.
         unsent.delete(threadId);
@@ -582,6 +645,7 @@ export const createRunController = (
       sendTurn(threadId, runId, { action: 'cancel' }, 'cancel', controller);
     },
     resendStop(threadId, runId) {
+      if (released.has(threadId)) return;
       // Queued ahead of the turn that follows it, which must not abort it: it owns no stream slot.
       const controller = new AbortController();
       detached.add(controller);
@@ -589,10 +653,12 @@ export const createRunController = (
       void openSettled(threadId).then(() => detached.delete(controller));
     },
     resume(threadId, runId, action, expect) {
+      if (released.has(threadId)) return;
       const controller = begin(threadId);
       sendTurn(threadId, runId, action, 'other', controller, { expect });
     },
     reportViz(threadId, report) {
+      if (released.has(threadId)) return;
       const queue = (vizQueue.get(threadId) ?? []).filter(
         (r) => !(r.runId === report.runId && r.vizId === report.vizId),
       );
@@ -603,6 +669,7 @@ export const createRunController = (
       if (!routes || runIds.length === 0) return;
       void (async () => {
         for (const runId of runIds) {
+          if (released.has(threadId)) return;
           let view: RunView;
           try {
             view = await routes.view(runId, threadId);
@@ -618,10 +685,10 @@ export const createRunController = (
       })();
     },
     loadSpec(threadId, runId, vizId) {
-      const key = `${runId}/${vizId}`;
+      const key = `${threadId}/${runId}/${vizId}`;
       const cached = specs.get(key);
       if (cached) return cached;
-      if (!routes) return Promise.resolve(null);
+      if (!routes || released.has(threadId)) return Promise.resolve(null);
       const loading = routes.view(runId, threadId).then(
         (view) => view.vizSpecs.find((s) => s.vizId === vizId && s.pinned !== null) ?? null,
         () => null,
@@ -632,6 +699,32 @@ export const createRunController = (
         if (!spec) specs.delete(key);
       });
       return loading;
+    },
+    release(threadId) {
+      if (released.has(threadId)) return;
+      released.add(threadId);
+      streams.get(threadId)?.abort();
+      streams.delete(threadId);
+      stopFollowing(threadId);
+      unsent.delete(threadId);
+      warmed.delete(threadId);
+      const timer = vizTimers.get(threadId);
+      if (timer !== undefined) clearTimeout(timer);
+      vizTimers.delete(threadId);
+      const reports = vizQueue.get(threadId) ?? [];
+      vizQueue.delete(threadId);
+      for (const report of reports) enqueue(threadId, () => sendStandaloneReport(threadId, report));
+      if (reports.length === 0 && (inflight.get(threadId)?.size ?? 0) === 0) inflight.delete(threadId);
+      for (const key of [...specs.keys()]) if (key.startsWith(`${threadId}/`)) specs.delete(key);
+    },
+    busyThreads() {
+      return busy;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
     activate() {
       disposed = false;
@@ -647,6 +740,8 @@ export const createRunController = (
       detached.clear();
       vizTimers.clear();
       unsent.clear();
+      // Queued turns are dropped as their turn comes (disposed); the followers are gone now.
+      refreshBusy();
     },
   };
 };

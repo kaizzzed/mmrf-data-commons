@@ -4,10 +4,12 @@ import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { coreStore, selectCurrentCohortId, setCohortList, setCurrentCohortId, type Cohort } from '@gen3/core';
 import { render } from 'test-utils';
+import { createThread, threadReducer, type ThreadAction } from './agui/reducer';
 import type { ParseResult } from './agui/sseParser';
 import { fixtureTransport, TransportError, type FixtureTransportOptions, type RunRoutes, type RunTransport } from './agui/transport';
 import type { AguiEvent, ConfirmPending, RunAgentInput, RunView, StateSnapshotEvent } from './agui/types';
 import AssistantApp, { spikeRequested, type AssistantAppProps } from './AssistantApp';
+import { deleteThreadLabel } from './components/ThreadList';
 import { memoryLedgerStore } from './cohort/saveLedger';
 import { createWriteLog } from './cohort/writeLog';
 import { FIXTURE_NOTICE, REFERENCE_PROMPTS, SYNTHETIC_NOTICE } from './constants';
@@ -759,6 +761,274 @@ describe('<AssistantApp /> next-step open links', () => {
     act(() => {
       coreStore.dispatch(setCurrentCohortId('c-all'));
     });
+  });
+});
+
+describe('<AssistantApp /> deleting a thread', () => {
+  const IN_PROGRESS = "Can't delete while a run is in progress";
+  const threadList = () => screen.getByRole('navigation', { name: 'Threads in this tab' });
+  const rowTitles = () =>
+    within(threadList())
+      .getAllByRole('listitem')
+      .map((li) => within(li).getAllByRole('button')[0].textContent);
+  const deleteButton = (title: string) => screen.getByRole('button', { name: `Delete thread: ${title}` });
+  const stored = () => JSON.parse(window.sessionStorage.getItem(TAB_STORAGE_KEY) ?? 'null') as {
+    activeThreadId: string;
+    threadIds: string[];
+    threads: Record<string, unknown>;
+  };
+
+  const confirmDelete = async (title: string) => {
+    await userEvent.click(deleteButton(title));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete this thread?' });
+    expect(dialog).toHaveTextContent("will be removed from this tab. This can't be undone.");
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  };
+
+  /** Asks in the thread on screen and waits for the stub's answer and for Send to come back. */
+  const askToAnswer = async (question: string) => {
+    await userEvent.type(composer(), `${question}{Enter}`);
+    expect(await within(conversation()).findByText(/Interpretation withheld: /)).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Send' });
+  };
+
+  it('removes the thread from the tab and from storage, says so, and focuses the thread now active', async () => {
+    const { transport, turns } = recordingTransport();
+    const first = renderApp(transport);
+    await askToAnswer('first question');
+    await userEvent.click(screen.getByRole('button', { name: 'New thread' }));
+    await askToAnswer('second question');
+    expect(rowTitles()).toEqual(['second question', 'first question']);
+    const askOf = (q: string) => turns.find((t) => t.forwardedProps.orion.action === 'ask' && t.messages[0]?.content === q);
+    const doomed = askOf('second question')?.threadId as string;
+    const kept = askOf('first question')?.threadId as string;
+    expect(doomed).not.toBe(kept);
+
+    await confirmDelete('second question');
+    expect(rowTitles()).toEqual(['first question']);
+    const active = within(threadList()).getByRole('button', { name: 'first question' });
+    expect(active).toHaveAttribute('aria-current', 'true');
+    expect(active).toHaveFocus();
+    expect(screen.getByRole('status')).toHaveTextContent('Thread deleted');
+    // The thread now on screen is the one that stays.
+    expect(within(conversation()).getAllByText('first question').length).toBeGreaterThan(0);
+    expect(within(conversation()).queryByText('second question')).toBeNull();
+    expect(stored()).toMatchObject({ activeThreadId: kept, threadIds: [kept] });
+    expect(stored().threads[doomed]).toBeUndefined();
+    // Nothing more leaves the browser for the deleted thread.
+    const sent = turns.length;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(turns.slice(sent).filter((t) => t.threadId === doomed)).toEqual([]);
+
+    first.unmount();
+    renderApp(recordingTransport().transport);
+    expect(await within(conversation()).findByText(/Interpretation withheld: /)).toBeInTheDocument();
+    expect(rowTitles()).toEqual(['first question']);
+  });
+
+  it('replaces the last thread with a fresh one, which warms up and offers no delete, and says so each time', async () => {
+    const { transport, turns } = recordingTransport();
+    renderApp(transport);
+    await askToAnswer('only question');
+    const before = turns[0].threadId;
+    await confirmDelete('only question');
+    expect(rowTitles()).toEqual(['New thread']);
+    expect(within(threadList()).getByRole('button', { name: 'New thread', current: true })).toHaveFocus();
+    expect(await screen.findByText(REFERENCE_PROMPTS[0].text)).toBeInTheDocument();
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('Thread deleted');
+    const fresh = stored().activeThreadId;
+    expect(fresh).not.toBe(before);
+    const warmups = () => turns.filter((t) => t.forwardedProps.orion.action === 'warmup').map((t) => t.threadId);
+    await waitFor(() => expect(warmups()).toEqual([before, fresh]));
+    // Deleting the empty thread would only bring back the same one, with a warm-up each time.
+    expect(within(threadList()).queryByRole('button', { name: /^Delete thread/ })).toBeNull();
+
+    // The same words again are a new announcement.
+    const said = status.firstElementChild;
+    await askToAnswer('next question');
+    await confirmDelete('next question');
+    expect(status).toHaveTextContent('Thread deleted');
+    expect(status.firstElementChild).not.toBe(said);
+    const third = stored().activeThreadId;
+    await waitFor(() => expect(warmups()).toEqual([before, fresh, third]));
+    expect(new Set(warmups()).size).toBe(3);
+  });
+
+  it('keeps the control off while the run is in flight, saying why only on the control, and on once it ends', async () => {
+    const { transport } = recordingTransport({ delayMs: 20 });
+    renderApp(transport);
+    await userEvent.type(composer(), 'q{Enter}');
+    await screen.findByRole('heading', { name: 'Plan, version 1' });
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+    expect(deleteButton('q')).toHaveAttribute('aria-disabled', 'true');
+    expect(deleteButton('q')).toHaveAccessibleDescription(IN_PROGRESS);
+    // Not a line under the row: it would read as an order to stop, and move the rows below.
+    expect(within(threadList()).getByText(IN_PROGRESS)).toHaveClass('sr-only');
+    await userEvent.click(deleteButton('q'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(await within(conversation()).findByText(/Interpretation withheld: /)).toBeInTheDocument();
+    await waitFor(() => expect(deleteButton('q')).not.toHaveAttribute('aria-disabled'));
+    expect(within(threadList()).queryByText(IN_PROGRESS)).toBeNull();
+  });
+
+  it('keeps the control off from Create until the confirm queued behind a warm-up has reached the agent (reload)', async () => {
+    const paused = replayStream('j3-save-pause');
+    saveTab({ ...createTab(paused.threadId), threads: { [paused.threadId]: paused } });
+    const { transport: inner, turns } = j3Transport();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transport: RunTransport = {
+      replay: true,
+      async *run(input, signal): AsyncGenerator<ParseResult> {
+        if (input.forwardedProps.orion.action === 'warmup') await gate;
+        yield* inner.run(input, signal);
+      },
+    };
+    const w = writes();
+    renderApp(transport, w.props);
+    const card = await pausedCard();
+    const control = () => screen.getByRole('button', { name: deleteThreadLabel(paused) });
+    // A run that waits on the researcher can go.
+    expect(control()).not.toHaveAttribute('aria-disabled');
+
+    await userEvent.click(within(card).getByRole('button', { name: 'Create' }));
+    expect(w.cohorts.port.list()).toHaveLength(3);
+    // The confirm waits for the warm-up: no invocation on the thread yet, but the turn is held.
+    expect(actions(turns)).not.toContain('confirm');
+    expect(control()).toHaveAttribute('aria-disabled', 'true');
+    expect(control()).toHaveAccessibleDescription(IN_PROGRESS);
+    await userEvent.click(control());
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(actions(turns)).toContain('confirm'));
+    expect(actions(turns).indexOf('warmup')).toBeLessThan(actions(turns).indexOf('confirm'));
+    expect(turns.find((t) => t.forwardedProps.orion.action === 'confirm')).toMatchObject({
+      threadId: paused.threadId,
+      runId: paused.runIds[0],
+    });
+    expect(await screen.findAllByText('Complete')).not.toHaveLength(0);
+    await waitFor(() => expect(control()).not.toHaveAttribute('aria-disabled'));
+    expect(rowTitles()).toHaveLength(1);
+  });
+
+  it('keeps a thread the tab refused to delete, controller and all, when a run started on it after the last render', async () => {
+    // Two runs this tab cached as ended; the record says the first one is executing again.
+    const T = 'd'.repeat(32);
+    const [r1, r2] = ['1'.repeat(32), '2'.repeat(32)];
+    const at = '2026-11-06T12:00:00.000Z';
+    const done = (runId: string): ThreadAction[] => [
+      { type: 'RUN_STARTED', threadId: T, runId },
+      { type: 'RUN_FINISHED', threadId: T, runId, result: { status: 'Complete', code: null } },
+    ];
+    const cached = [
+      { type: 'submit', runId: r1, question: 'first question', at } as ThreadAction,
+      ...done(r1),
+      { type: 'submit', runId: r2, question: 'second question', at } as ThreadAction,
+      ...done(r2),
+    ].reduce(threadReducer, createThread(T));
+    saveTab({ ...createTab(T), threads: { [T]: cached } });
+    const executing = streamViews('j1-complete').find((v) => v.status === 'Executing') as RunView;
+    let releaseView: () => void = () => undefined;
+    const viewGate = new Promise<void>((resolve) => {
+      releaseView = resolve;
+    });
+    const routes: RunRoutes = {
+      view: jest.fn(async (runId: string) => {
+        if (runId !== r1) throw new TransportError('NETWORK', 'offline');
+        await viewGate;
+        return { ...executing, threadId: T, runId: r1, question: 'first question' };
+      }),
+      record: jest.fn(),
+      recordDownloadHref: () => '',
+    };
+    const { transport: inner, turns } = recordingTransport();
+    renderApp({ routes, replay: true, run: (input, signal) => inner.run(input, signal) });
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete thread: first question' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete this thread?' });
+    const del = within(dialog).getByRole('button', { name: 'Delete' });
+
+    await act(async () => {
+      releaseView();
+      // The restore dispatches the record's copy (in flight) with no render in between, so the
+      // click below runs on the last render's closures, which still see both runs ended.
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(routes.view).toHaveBeenCalledWith(r2, T);
+      expect(del).toBeEnabled();
+      del.click();
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(rowTitles()).toEqual(['first question']);
+    expect(stored().threadIds).toEqual([T]);
+    expect(screen.getByRole('status')).not.toHaveTextContent('Thread deleted');
+    await waitFor(() => expect(deleteButton('first question')).toHaveAttribute('aria-disabled', 'true'));
+
+    // The controller still serves the thread: a question in it goes out.
+    await userEvent.type(composer(), 'third question{Enter}');
+    await waitFor(() =>
+      expect(turns.find((t) => t.forwardedProps.orion.action === 'ask')).toMatchObject({ threadId: T }),
+    );
+  });
+
+  it('keeps the control off while Create reads the definitions it saves, then confirms into the thread', async () => {
+    // A pause whose snapshot dropped every definition, so Create reads them from the view route.
+    const stream = streamText('j3-save-pause')
+      .split('\n\n')
+      .filter((frame) => frame && !frame.includes('"TOOL_CALL_'))
+      .map((frame) => {
+        const event = JSON.parse(frame.slice('data: '.length)) as AguiEvent;
+        if (event.type === 'STATE_SNAPSHOT' && event.snapshot.pending?.kind === 'confirm') {
+          const pending = event.snapshot.pending;
+          return { ...event, snapshot: { ...event.snapshot, pending: { ...pending, cohorts: pending.cohorts.map((c) => ({ ...c, definition: null })) } } };
+        }
+        return event;
+      })
+      .map((e) => `data: ${JSON.stringify(e)}\n\n`)
+      .join('');
+    const inner = fixtureTransport({ delayMs: 0, stream, replies: { confirm: streamText('j3-after-confirm') } });
+    const turns: RunAgentInput[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const routes: RunRoutes = {
+      view: jest.fn(async (runId: string, threadId: string) => {
+        await gate;
+        return { ...PAUSE, runId, threadId };
+      }),
+      record: jest.fn(),
+      recordDownloadHref: () => '',
+    };
+    const transport: RunTransport = {
+      routes,
+      run: (input, signal) => {
+        turns.push(input);
+        return inner.run(input, signal);
+      },
+    };
+    renderApp(transport, writes().props);
+    await userEvent.type(composer(), 'DE by KRAS{Enter}');
+    const card = await pausedCard();
+    // A run that waits on the researcher is not in flight.
+    expect(deleteButton('DE by KRAS')).not.toHaveAttribute('aria-disabled');
+    await userEvent.click(within(card).getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(deleteButton('DE by KRAS')).toHaveAttribute('aria-disabled', 'true'));
+    expect(deleteButton('DE by KRAS')).toHaveAccessibleDescription("Can't delete while cohorts are being saved");
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(actions(turns)).toContain('confirm'));
+    expect(turns.find((t) => t.forwardedProps.orion.action === 'confirm')?.threadId).toBe(turns[1].threadId);
+    expect(await screen.findAllByText('Complete')).not.toHaveLength(0);
+    await waitFor(() => expect(deleteButton('DE by KRAS')).not.toHaveAttribute('aria-disabled'));
   });
 });
 
